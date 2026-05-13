@@ -1,0 +1,110 @@
+直接说结论：你这个 `try.py` 的主流程是 **“ROS监听 + TCP发控制帧 + 状态机导航”** 三条线并行协作。  
+下面按实际执行顺序梳理：
+
+---
+
+## 1) 程序启动阶段
+
+1. 进入 `main()`
+####2. `print_header()` 打印阶段说明
+3. `rclpy.init()` 初始化 ROS2
+4. 创建 `Flag1Subscriber()`  
+   ####- 订阅 `/odin1/flag1`（重定位成功标志）
+   - 创建 TF buffer/listener（后续读 map/odom/base_link）
+5. 启动 ROS spin 子线程：`ros2_spin_thread()`  
+   - 异步更新 `flag1_value` 和 TF 数据
+6. `connect_with_retry()` 连接下位机 TCP（直到成功）
+7. 初始化功能对象：
+   - `RotationState()`（阶段1旋转策略）
+   - `LidarPositionCalculator()`（TF -> 机器人中心位姿）
+   - `NavigationController()`（导航控制器）
+8. 初始化运行变量：
+   - `robot_state = ROTATING`
+   - `seq`, `next_send`, `motion_history` 等
+
+---
+
+## 2) 主循环（50Hz）每一帧做什么
+
+每轮都会：
+
+1. 创建 `channels = [0]*10`
+2. 初始化 `yaw_i16 = 0`
+3. 按 `robot_state` 分支执行控制逻辑
+4. 打包帧 `build_frame(seq, channels, yaw_i16)`（新协议）
+5. `sock.sendall(frame)` 发给下位机
+6. `seq` 自增并按 50Hz 节拍 sleep
+
+---
+
+## 3) 状态机逻辑顺序
+
+### 状态A：`ROTATING`（等待重定位）
+- 调 `rotation_state.get_rotation_command()` 给原地旋转指令（写到 `channels[3]`）
+- 若 `flag1=True` 且旋转命令变为0，则切到 `ALIGNING_DIRECTION`
+
+---
+
+### 状态B/C/D：导航阶段（对齐->前进->最终对齐）
+当状态在以下集合时进入导航分支：
+- `ALIGNING_DIRECTION`
+- `MOVING_TO_ORIGIN`
+- `FINAL_ALIGNMENT`
+- `RELOCATED`（虽然基本没实际用）
+
+流程：
+
+1. `position_calculator.get_lidar_position()` 取当前位置与 yaw
+2. 把 `lidar_yaw` 转成 `yaw_i16`（角度[-180,180] * 100）
+3. 首次拿到位姿时记录 `lidar_initial_position`
+4. 调 `navigation_controller.calculate_commands(...)` 算 `forward_cmd/rotation_cmd`
+5. 根据返回 `reached_stop/reached_final` 和稳定判据更新状态：
+   - `ALIGNING_DIRECTION -> MOVING_TO_ORIGIN`（稳定对准后）
+   - 到停点 -> `FINAL_ALIGNMENT`
+   - 到停点且最终角也对齐 -> `REACHED_ORIGIN`
+6. 把控制量写到：
+   - `channels[2] = forward_cmd`
+   - `channels[3] = rotation_cmd`
+
+---
+
+## 4) Yaw下发逻辑（你新加的）
+
+- 只有拿到 `position_data` 才会更新真实 `yaw_i16`
+- 否则该帧默认发 `0`
+- 每一帧都带 yaw 字段（新协议 payload 最后一个 int16）
+
+---
+
+## 5) 异常与退出
+
+- 发送失败：捕获异常 -> 关闭旧 socket -> `connect_with_retry()` 重连 -> 继续循环
+- `KeyboardInterrupt`：打印统计
+- `finally`：
+  - 发送一帧全零停止命令
+  - 关闭 socket
+  - `rclpy.shutdown()`
+
+---
+
+## 你接下来最适合封装的方法（按优先级）
+
+1. **通信层**
+   - `connect()`
+   - `build_frame()`
+   - `send_frame_with_reconnect()`
+
+2. **姿态层**
+   - `get_pose()`（现在的 `get_lidar_position`）
+   - `yaw_to_i16()`（deg归一化 + *100 + 限幅）
+
+3. **控制层**
+   - `get_rotation_command()`（阶段1）
+   - `calculate_commands()`（导航主控制）
+
+4. **流程层**
+   - `step()`：单帧执行（输入当前状态，输出下一状态+channels+yaw）
+
+---
+
+如果你愿意，我下一条可以直接给你一个“**封装边界图**”（哪些变量放类成员，哪些当参数传入），你就能非常顺地拆成库。
