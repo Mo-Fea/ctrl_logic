@@ -10,9 +10,21 @@ import numpy as np
 import race
 
 try:
-    import pyrealsense2 as rs
+    from .process import (
+        create_qr_detector,
+        detect_qr_data,
+        get_color_frame,
+        is_valid_qr_payload,
+        open_d435i,
+    )
 except ImportError:
-    rs = None
+    from process import (
+        create_qr_detector,
+        detect_qr_data,
+        get_color_frame,
+        is_valid_qr_payload,
+        open_d435i,
+    )
 
 
 # 机器人动作矩阵列定义（n * 5，每一行表示一个顺序动作）
@@ -62,38 +74,6 @@ def qr_to_kfs(qr_string):
         # 映射到字典
         kfs[pos] = mapping.get(char, None)
     return kfs
-
-
-def open_d435i():
-    """
-    打开 D435i 的彩色流。
-    """
-    if rs is None:
-        raise RuntimeError("未安装 pyrealsense2，无法打开 D435i 彩色流  ")
-
-    pipeline = rs.pipeline()
-    config = rs.config()
-    config.enable_stream(rs.stream.color, 640, 480, rs.format.bgr8, 30)
-    profile = pipeline.start(config)
-
-    device = profile.get_device()
-    device_name = device.get_info(rs.camera_info.name)
-    serial = device.get_info(rs.camera_info.serial_number)
-    print(f"[信息]: 已连接 RealSense 设备: {device_name} (S/N: {serial})")
-
-    # 预热几帧，避免刚启动时曝光还没稳定。
-    for _ in range(15):
-        pipeline.wait_for_frames()
-
-    return pipeline
-
-
-def get_color_frame(pipeline):
-    frames = pipeline.wait_for_frames()
-    color_frame = frames.get_color_frame()
-    if not color_frame:
-        return None
-    return np.asanyarray(color_frame.get_data())
 
 
 def _direction_code(from_pos, to_pos):
@@ -228,7 +208,7 @@ def main():
         print("请确认相机已连接，且没有被其他 RealSense 程序占用。")
         return
 
-    detector = cv2.QRCodeDetector()
+    detector = create_qr_detector()
     last_processed_data = None
 
     print("====================================")
@@ -243,10 +223,10 @@ def main():
             break
 
         # 尝试识别二维码
-        data, _, _ = detector.detectAndDecode(frame)
+        data = detect_qr_data(frame, detector=detector)
 
         # 仅在获取到 12 位有效数据时进行规划
-        if data and len(data) == 12:
+        if is_valid_qr_payload(data):
             if data == last_processed_data:
                 cv2.imshow("R2 QR Scanner", frame)
                 if cv2.waitKey(1) == ord('q'):

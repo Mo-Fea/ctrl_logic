@@ -506,7 +506,7 @@ direction  吸取动作方向，1=前方, 2=+90deg/左, 3=-90deg/右, 4=后方
 
 ## 动作矩阵与 KFS 路线
 
-`utils/meilin.py` 负责规划梅林区域路线，`utils/utils.py` 已提供无 GUI 生成入口：
+当前主线使用 `utils/race.py` 负责新版比赛规则路径规划，`utils/utils.py` 已更新为无 GUI 生成入口：
 
 ```python
 from utils.utils import build_action_matrix_from_qr
@@ -525,25 +525,61 @@ action_matrix, path, kfs = build_action_matrix_from_qr("000020020200")
 - `from_pos`：动作起点格编号。
 - `to_pos`：动作目标格编号。
 - `move_dir`：`0=原地`，`1=前方`，`2=+90度/左`，`3=-90度/右`，`4=后方`。
-- `height_action`：`0=无高度变化`，`1=上台阶`，`2=下台阶`。
-- `grab_action`：`0=不夹取`，`1=行进前抓目标格R2`，`2=旁夹R2`，`3=R1协助移除`。
+- `height_action`：`0=不用上下楼梯`，`1=需要上下楼梯`。上/下由 `module.get_stair_height_relation(from_pos, move_dir)` 在执行层按真实台阶矩阵判断。
+- `grab_action`：`0=不抓取`，`1=抓取`。当前 `utils/utils.py`、`utils/route1.py` 与 `utils/route.py` 都只输出 `0/1`。
 
-当前已开始在 `lib2/module.py` 中封装动作矩阵解释层。第一步是单行解释框架：
+当前已在 `lib2/module.py` 中继续封装动作矩阵解释层。单行执行入口：
 
 ```python
-module.execute_action_row(sender, position_runtime, odom_runtime, action_row)
+module.execute_action_row(
+    sender,
+    position_runtime,
+    odom_runtime,
+    action_row,
+    final_direction=1,
+)
 ```
 
 当前 `execute_action_row()` 已实现：
 
 - 接收一行 `action_row`，格式仍为 `[from_pos, to_pos, move_dir, height_action, grab_action]`。
+- 新增 `final_direction` 输入，默认 `1`，必须是 `1/2/3/4`，表示本行任务完成后的最终朝向。
 - 检查行长度必须为 `5`，否则打印错误并 `sys.exit(1)`。
 - 行长度正确后，先读取 `from_pos/to_pos`，通过 `tools.stair_id_to_direction(from_pos, to_pos)` 推导相邻方向，再调用 `module.get_stair_height_relation(from_pos, inferred_direction)` 获取高低关系并存入结果；`from_pos == to_pos` 时高低关系记为 `0`。
+- 检查 `move_dir` 必须与 `from_pos/to_pos` 的坐标推导方向一致；不一致时直接报错退出。
 - 检查 `move_dir` 必须为 `0/1/2/3/4`，否则打印错误并 `sys.exit(1)`。
-- `move_dir != 0` 时进入“有方向动作”占位分支。
-- `move_dir == 0` 时进入“原地动作”占位分支。
+- 当前地图相邻台阶不存在等高普通平移，因此新增防御检查：如果 `move_dir != 0 and height_action == 0 and grab_action == 0`，视为动作矩阵错误并 `sys.exit(1)`。
+- `move_dir != 0` 时才获取 `from_x/from_y/to_x/to_y`，来源是 `module.get_stair_xy(from_pos/to_pos)`；原地分支暂不预取坐标。
+- `grab_action == 1` 时调用 `module.fetch_and_store_kfs(...)`，输入 `stair_id=from_pos`、`direction=move_dir`、`final_target_yaw_deg=tools.direction_int_to_yaw_deg(final_direction)`；执行完立即返回。
+- `height_action != 0` 时调用 `module.execute_stair_transition(...)`，把 `from_x/from_y/to_x/to_y/height_relation/move_dir/final_direction` 传入；执行完立即返回。
+- `move_dir == 0` 时仍进入原地占位分支，尚未接入真实动作。
 
-真实动作调用还没有接入，后续会在这两个分支里继续补充夹取、上下楼梯、普通移动等逻辑。
+新增 `module.execute_stair_transition(...)` 用于统一执行上下楼：
+
+```python
+module.execute_stair_transition(
+    sender,
+    position_runtime,
+    odom_runtime,
+    from_x,
+    from_y,
+    to_x,
+    to_y,
+    height_relation,
+    task_direction,
+    final_direction,
+)
+```
+
+逻辑：
+
+- `height_relation` 必须是 `1/2`，否则报错并 `sys.exit(1)`。
+- `height_relation == 1`：目标格比当前格高，调用 `module.climb(..., direction1=task_direction, direction2=final_direction, x=to_x, y=to_y)`。
+- `height_relation == 2`：目标格比当前格低，调用 `module.descend(..., direction1=task_direction, direction2=final_direction, current_x=from_x, current_y=from_y, des_x=to_x, des_y=to_y)`。
+
+`module.fetch_and_store_kfs(...)` 也已新增 `final_target_yaw_deg=0.0` 输入。吸取并存储完成后，最后倒退回当前 `stair_id` 中心点时，会把 `final_target_yaw_deg` 传给 `move_backward_to_des(..., target_deg=final_target_yaw_deg)`，因此执行矩阵行时可以通过 `final_direction` 控制夹取后的最终朝向。
+
+当前真实动作已接入 `grab_action == 1` 和 `height_action != 0` 两类方向动作。按当前真实场地和规划规则，不应接入等高普通移动分支；如果后续地图允许相邻等高台阶，再重新讨论并补普通移动封装。
 
 后续再封装整矩阵循环执行函数，例如：
 
@@ -562,6 +598,76 @@ lib2/move.py           只负责底层阻塞动作
 ```
 
 一次性生成动作矩阵时，若要线程传递结果，推荐 `queue.Queue(maxsize=1)`，不要裸全局变量。生成线程 `put(action_matrix)`，主任务 `get()` 阻塞等待后执行。
+
+### 动作矩阵执行层当前工作进程
+
+当前窗口的主线是继续封装 `lib2/module.py` 的动作矩阵执行层，并保持 `utils/race.py` 的规划规则稳定。当前状态：
+
+- `utils/race.py`：当前主线路径规划，维护台阶编号、邻接、高度、R1/R2/fake KFS 约束；方向语义与 `lib2/module.py` 的梅林矩阵一致。
+- `utils/meilin.py`：旧规划版本，保留作参考，不再作为无 GUI 主入口。
+- `utils/route1.py`：带 D435i/GUI 的新版扫描和动作矩阵生成入口，基于 `race.py`。
+- `utils/route.py`：仍是带 D435i/GUI 的旧入口，历史代码中仍有 `meilin.py` 语义，后续使用前要确认是否还需要维护。
+- `utils/utils.py`：无 GUI 工具入口，已从旧 `meilin.py` 切到新版 `race.py`，负责 `qr/kfs/path -> action_matrix`；主任务优先调用这里，不要把执行动作写进 utils。
+- `lib2/tools.py`：方向码、台阶编号到矩阵下标、台阶编号到相邻方向等通用工具。
+- `lib2/module.py`：动作解释和组合动作封装层。`execute_action_row()` 应只解释矩阵并调用已有组合动作；不要在这里重写 TCP 协议或底层通道细节。
+- `lib2/move.py`：底层阻塞动作和通道时序，例如旋转、移动、上下楼底层触发、KFS 姿态触发。
+
+当前方向动作分支已开始复用：
+
+```python
+module.fetch_and_store_kfs(
+    sender,
+    position_runtime,
+    odom_runtime,
+    stair_id,
+    direction,
+    final_target_yaw_deg=0.0,
+)
+module.execute_stair_transition(...)
+module.climb(sender, position_runtime, odom_runtime, direction1, direction2, x, y)
+module.descend(sender, position_runtime, odom_runtime, direction1, direction2, current_x, current_y, des_x, des_y)
+```
+
+统一输入思路：
+
+```text
+from_pos/to_pos     来自动作矩阵
+from_x/from_y       move_dir != 0 分支内按需读取
+to_x/to_y           move_dir != 0 分支内按需读取
+move_dir            当前任务方向，仍传 int，不要提前转角度
+final_dir           最终方向，也传 int；上下楼函数内部会转角度
+height_action       1=需要上下楼，0=不上下楼；上/下由 height_relation 判断
+grab_action         1=抓取，0=不抓取；当前矩阵生成层只输出 0/1
+```
+
+注意：`module.climb()`、`module.descend()` 内部已经完成方向 int 到角度转换；`module.fetch_and_store_kfs()` 的夹取方向仍传 int，但最终朝向现在传 `final_target_yaw_deg`，当前 `execute_action_row()` 会由 `final_direction` 统一转换。只有直接调用 `move_to_des()` 时才需要传 `target_deg`，但当前规划保证不出现等高普通移动，暂不把普通移动作为主分支。
+
+当前验证状态：
+
+- 已运行 `python3 -m py_compile lib2/module.py`。
+- 已运行 `python3 -m py_compile utils/utils.py`。
+- 已用 `build_action_matrix_from_qr("000020020200")` 做过一次无 GUI 生成检查，确认 `height_action` 和 `grab_action` 都只输出 `0/1`。
+- `execute_action_row()` 的真实硬件动作分支尚未实机验证。
+
+### 协作和实现偏好
+
+- 用户希望尽量复用已有封装，尤其是 `module.py` 组合动作、`move.py` 底层动作、`tools.py` 方向/矩阵工具；不要重复实现已有逻辑。
+- 发现规划语义、动作矩阵、真实场地假设之间可能矛盾时，要明确指出并质问确认，不要为了继续写代码而默认绕过。
+- 对硬件动作相关逻辑要保守，宁可加防御检查并退出，也不要静默跳过可能危险的动作。
+- 讨论方向时，外部接口优先使用方向 int：`1=前方/x+`、`2=+90/左/y+`、`3=-90/右/y-`、`4=后方/x-`；角度转换应尽量留在已有封装内部。
+- README 是下一窗口的交接入口；当前进度、关键假设、未完成分支和实机风险要及时写进 README。
+
+### README 更新要求
+
+当用户说“更新 README”或需要交接下一个窗口时，更新内容应至少包含：
+
+- 当前已经完成的修改：文件路径、函数名、行为变化。
+- 当前未完成的工作：下一步应从哪个函数/分支继续。
+- 关键项目结构和文件逻辑关系：规划层、工具层、组合动作层、底层动作层分别在哪里。
+- 关键方法职责和输入输出：尤其是动作矩阵字段、方向编码、上下楼/KFS 的输入。
+- 当前用户确认过的假设：例如真实场地不存在相邻等高普通移动。
+- 需要保留的协作偏好：尽量复用、发现逻辑矛盾要质问、硬件动作加防御检查。
+- 已知风险和验证状态：哪些只做了语法/干跑，哪些还未实机验证。
 
 ## 已知注意事项
 

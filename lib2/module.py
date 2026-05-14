@@ -1135,6 +1135,7 @@ def fetch_and_store_kfs(
     odom_runtime,
     stair_id,
     direction,
+    final_target_yaw_deg=0.0,
     adjust_distance=PRE_DESCEND_ADJUST_DISTANCE,
     move_speed=600,
     suction_hold_sec=DEFAULT_KFS_SUCTION_HOLD_SEC,
@@ -1223,7 +1224,7 @@ def fetch_and_store_kfs(
         odom_runtime=odom_runtime,
         x=stair_x,
         y=stair_y,
-        target_deg=0.0,
+        target_deg=final_target_yaw_deg,
         v=move_speed,
     )
 
@@ -1233,6 +1234,7 @@ def fetch_and_store_kfs(
         "direction": int(direction),
         "height_relation": int(height_relation),
         "grab_pose_id": int(grab_pose_id),
+        "final_target_yaw_deg": float(final_target_yaw_deg),
         "stair_x": float(stair_x),
         "stair_y": float(stair_y),
         "adjust_result": adjust_result,
@@ -1585,6 +1587,96 @@ def descend(
     }
 
 
+def execute_stair_transition(
+    sender,
+    position_runtime,
+    odom_runtime,
+    from_x,
+    from_y,
+    to_x,
+    to_y,
+    height_relation,
+    task_direction,
+    final_direction,
+):
+    """
+    根据 from/to 高低关系执行一次上下楼梯动作。
+
+    height_relation:
+      1: to 比 from 高，调用 climb(...)
+      2: to 比 from 低，调用 descend(...)
+
+    task_direction 是本次上下楼方向，final_direction 是动作完成后的最终朝向。
+    """
+    height_relation = int(height_relation)
+    task_direction = int(task_direction)
+    final_direction = int(final_direction)
+
+    if height_relation not in (1, 2):
+        print(
+            f"{execute_stair_transition.__name__}输入错误: "
+            f"height_relation={height_relation}, 必须是 1/2"
+        )
+        sys.exit(1)
+    if task_direction not in (1, 2, 3, 4):
+        print(
+            f"{execute_stair_transition.__name__}输入错误: "
+            f"task_direction={task_direction}, 必须是 1/2/3/4"
+        )
+        sys.exit(1)
+    if final_direction not in (1, 2, 3, 4):
+        print(
+            f"{execute_stair_transition.__name__}输入错误: "
+            f"final_direction={final_direction}, 必须是 1/2/3/4"
+        )
+        sys.exit(1)
+
+    if height_relation == 1:
+        stair_result = climb(
+            sender=sender,
+            position_runtime=position_runtime,
+            odom_runtime=odom_runtime,
+            direction1=task_direction,
+            direction2=final_direction,
+            x=to_x,
+            y=to_y,
+        )
+        return {
+            "height_relation": int(height_relation),
+            "task_direction": int(task_direction),
+            "final_direction": int(final_direction),
+            "from_x": float(from_x),
+            "from_y": float(from_y),
+            "to_x": float(to_x),
+            "to_y": float(to_y),
+            "stair_action": "climb",
+            "stair_result": stair_result,
+        }
+
+    stair_result = descend(
+        sender=sender,
+        position_runtime=position_runtime,
+        odom_runtime=odom_runtime,
+        direction1=task_direction,
+        direction2=final_direction,
+        current_x=from_x,
+        current_y=from_y,
+        des_x=to_x,
+        des_y=to_y,
+    )
+    return {
+        "height_relation": int(height_relation),
+        "task_direction": int(task_direction),
+        "final_direction": int(final_direction),
+        "from_x": float(from_x),
+        "from_y": float(from_y),
+        "to_x": float(to_x),
+        "to_y": float(to_y),
+        "stair_action": "descend",
+        "stair_result": stair_result,
+    }
+
+
 def _action_row_to_list(action_row):
     if hasattr(action_row, "tolist"):
         action_row = action_row.tolist()
@@ -1630,6 +1722,7 @@ def execute_action_row(
     position_runtime,
     odom_runtime,
     action_row,
+    final_direction=1,
 ):
     """
     解释并执行动作矩阵中的一行。
@@ -1642,6 +1735,13 @@ def execute_action_row(
         _action_value_to_int(value, ACTION_MATRIX_COLUMNS[index])
         for index, value in enumerate(row_values)
     ]
+    final_direction = _action_value_to_int(final_direction, "final_direction")
+    if final_direction not in (1, 2, 3, 4):
+        print(
+            f"{execute_action_row.__name__}输入错误: "
+            f"final_direction={final_direction}, 必须是 1/2/3/4"
+        )
+        sys.exit(1)
 
     inferred_direction = tools.stair_id_to_direction(
         from_pos,
@@ -1651,17 +1751,29 @@ def execute_action_row(
     if from_pos != to_pos and inferred_direction == 0:
         print(f"{execute_action_row.__name__}输入错误: {from_pos} 与 {to_pos} 不相邻")
         sys.exit(1)
+    if move_dir != 0 and inferred_direction != 0 and move_dir != inferred_direction:
+        print(
+            f"{execute_action_row.__name__}输入错误: "
+            f"move_dir={move_dir} 与坐标推导方向 inferred_direction={inferred_direction} 不一致"
+        )
+        sys.exit(1)
 
     height_relation = (
         0
         if inferred_direction == 0
         else get_stair_height_relation(from_pos, inferred_direction)
     )
-
     if move_dir not in (0, 1, 2, 3, 4):
         print(
             f"{execute_action_row.__name__}输入错误: "
             f"{ACTION_MATRIX_COLUMNS[2]}={move_dir}, 必须是 0/1/2/3/4"
+        )
+        sys.exit(1)
+    if move_dir != 0 and height_action == 0 and grab_action == 0:
+        print(
+            f"{execute_action_row.__name__}输入错误: "
+            "当前地图不应出现等高普通移动 "
+            f"action_row={[from_pos, to_pos, move_dir, height_action, grab_action]}"
         )
         sys.exit(1)
 
@@ -1678,11 +1790,51 @@ def execute_action_row(
         "move_dir": int(move_dir),
         "height_action": int(height_action),
         "grab_action": int(grab_action),
+        "final_direction": int(final_direction),
         "inferred_direction": int(inferred_direction),
         "height_relation": int(height_relation),
     }
 
     if move_dir != 0:
+        from_x, from_y = get_stair_xy(from_pos)
+        to_x, to_y = get_stair_xy(to_pos)
+        result["from_x"] = float(from_x)
+        result["from_y"] = float(from_y)
+        result["to_x"] = float(to_x)
+        result["to_y"] = float(to_y)
+
+        if grab_action == 1:
+            fetch_result = fetch_and_store_kfs(
+                sender=sender,
+                position_runtime=position_runtime,
+                odom_runtime=odom_runtime,
+                stair_id=from_pos,
+                direction=move_dir,
+                final_target_yaw_deg=tools.direction_int_to_yaw_deg(final_direction),
+            )
+            result["branch"] = "directional"
+            result["fetch_result"] = fetch_result
+            result["implemented"] = True
+            return result
+
+        if height_action != 0:
+            stair_transition_result = execute_stair_transition(
+                sender=sender,
+                position_runtime=position_runtime,
+                odom_runtime=odom_runtime,
+                from_x=from_x,
+                from_y=from_y,
+                to_x=to_x,
+                to_y=to_y,
+                height_relation=height_relation,
+                task_direction=move_dir,
+                final_direction=final_direction,
+            )
+            result["branch"] = "directional"
+            result["stair_transition_result"] = stair_transition_result
+            result["implemented"] = True
+            return result
+
         # TODO: 第一段逻辑：有方向动作，后续在这里接入夹取、上下楼梯和移动。
         result["branch"] = "directional"
         result["implemented"] = False

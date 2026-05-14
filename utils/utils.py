@@ -2,8 +2,27 @@ import numpy as np
 
 try:
     from . import meilin
+    from . import race
 except ImportError:
     import meilin
+    import race
+
+
+TASK_CHALLENGE = "challenge"  # 挑战赛：2个R1、2个R2，使用 race.py
+TASK_COMBAT = "combat"        # 对抗赛：更多KFS，使用 meilin.py
+
+TASK_TYPE_ALIASES = {
+    TASK_CHALLENGE: TASK_CHALLENGE,
+    "race": TASK_CHALLENGE,
+    "route1": TASK_CHALLENGE,
+    "tiaozhan": TASK_CHALLENGE,
+    "挑战赛": TASK_CHALLENGE,
+    TASK_COMBAT: TASK_COMBAT,
+    "meilin": TASK_COMBAT,
+    "route": TASK_COMBAT,
+    "duikang": TASK_COMBAT,
+    "对抗赛": TASK_COMBAT,
+}
 
 
 # Robot action matrix columns: one row is one sequential action.
@@ -32,16 +51,34 @@ MOVE_DIR_NAMES = {
 }
 
 GRAB_ACTION_NAMES = {
-    0: "不夹取",
-    1: "行进前抓目标格R2",
-    2: "旁夹R2",
-    3: "R1协助移除",
+    0: "不抓取",
+    1: "抓取",
 }
+
+
+def normalize_task_type(task_type=TASK_CHALLENGE):
+    task_key = str(task_type).strip().lower()
+    normalized = TASK_TYPE_ALIASES.get(task_key)
+    if normalized is None:
+        raise ValueError(
+            f"未知任务类型: {task_type}. "
+            f"可选: {TASK_CHALLENGE}/{TASK_COMBAT}/race/meilin/route1/route"
+        )
+    return normalized
+
+
+def get_task_planner(task_type=TASK_CHALLENGE):
+    task_type = normalize_task_type(task_type)
+    if task_type == TASK_CHALLENGE:
+        return race
+    if task_type == TASK_COMBAT:
+        return meilin
+    raise ValueError(f"未知任务类型: {task_type}")
 
 
 def qr_to_kfs(qr_string):
     """
-    Convert a 12-character QR payload into the KFS dictionary used by meilin.py.
+    Convert a 12-character QR payload into the KFS dictionary used by race.py.
 
     Character mapping:
     0 -> empty
@@ -62,45 +99,47 @@ def qr_to_kfs(qr_string):
     return kfs
 
 
-def _direction_code(from_pos, to_pos):
-    """Calculate grid movement direction code from meilin.py position coordinates."""
+def _direction_code(from_pos, to_pos, task_type=TASK_CHALLENGE):
+    """Calculate grid movement direction code from the selected task planner."""
     if from_pos == to_pos:
         return 0
 
-    from_row, from_col, _ = meilin.pos_to_coord[int(from_pos)]
-    to_row, to_col, _ = meilin.pos_to_coord[int(to_pos)]
-    delta = (to_row - from_row, to_col - from_col)
+    planner = get_task_planner(task_type)
+    from_a, from_b, _ = planner.pos_to_coord[int(from_pos)]
+    to_a, to_b, _ = planner.pos_to_coord[int(to_pos)]
+    delta = (to_a - from_a, to_b - from_b)
     if delta not in MOVE_DIR_CODES:
         raise ValueError(f"位置 {from_pos} 到 {to_pos} 不是相邻格，无法生成动作矩阵")
     return MOVE_DIR_CODES[delta]
 
 
-def _height_action(from_pos, to_pos):
-    """Return stair action: 1=climb, 2=descend, 0=no height change/no movement."""
+def _height_action(from_pos, to_pos, task_type=TASK_CHALLENGE):
+    """Return stair action: 1=needs stair action, 0=no height change/no movement."""
     if from_pos == to_pos:
         return 0
 
-    from_height = meilin.pos_to_coord[int(from_pos)][2]
-    to_height = meilin.pos_to_coord[int(to_pos)][2]
-    diff = to_height - from_height
-    if diff > 0:
+    planner = get_task_planner(task_type)
+    from_height = planner.pos_to_coord[int(from_pos)][2]
+    to_height = planner.pos_to_coord[int(to_pos)][2]
+    if to_height - from_height != 0:
         return 1
-    if diff < 0:
-        return 2
     return 0
 
 
-def path_to_action_matrix(kfs, path):
+def path_to_action_matrix(kfs, path, task_type=TASK_CHALLENGE):
     """
-    Convert meilin.plan_path() output into an n*5 robot action matrix.
+    Convert planner output into an n*5 robot action matrix.
 
     Row format:
     [from_pos, to_pos, move_dir, height_action, grab_action]
     """
+    task_type = normalize_task_type(task_type)
+    planner = get_task_planner(task_type)
+
     if not path:
         return np.zeros((0, 5), dtype=int)
 
-    is_valid, message = meilin.validate_path(kfs, path)
+    is_valid, message = planner.validate_path(kfs, path)
     if not is_valid:
         raise ValueError(f"无法生成动作矩阵：{message}")
 
@@ -108,7 +147,7 @@ def path_to_action_matrix(kfs, path):
     current_pos = path[0]
     taken_set = set()
 
-    # If the entry cell contains an R2-KFS, meilin.py treats it as taken.
+    # If the entry cell contains an R2-KFS, the planner treats it as taken.
     if kfs.get(current_pos) == "R2":
         rows.append([current_pos, current_pos, 0, 0, 1])
         taken_set.add(current_pos)
@@ -119,18 +158,18 @@ def path_to_action_matrix(kfs, path):
                 rows.append([
                     current_pos,
                     step,
-                    _direction_code(current_pos, step),
+                    _direction_code(current_pos, step, task_type=task_type),
                     0,
                     1,
                 ])
                 taken_set.add(step)
 
-            grab_action = 3 if kfs.get(step) == "R1" else 0
+            grab_action = 1 if kfs.get(step) == "R1" else 0
             rows.append([
                 current_pos,
                 step,
-                _direction_code(current_pos, step),
-                _height_action(current_pos, step),
+                _direction_code(current_pos, step, task_type=task_type),
+                _height_action(current_pos, step, task_type=task_type),
                 grab_action,
             ])
             current_pos = step
@@ -143,9 +182,9 @@ def path_to_action_matrix(kfs, path):
             rows.append([
                 from_pos,
                 to_pos,
-                _direction_code(from_pos, to_pos),
+                _direction_code(from_pos, to_pos, task_type=task_type),
                 0,
-                2,
+                1,
             ])
             taken_set.add(to_pos)
 
@@ -157,7 +196,7 @@ def path_to_action_matrix(kfs, path):
     return np.array(rows, dtype=int)
 
 
-def build_action_matrix_from_kfs(kfs):
+def build_action_matrix_from_kfs(kfs, task_type=TASK_CHALLENGE):
     """
     Plan a route from an existing KFS dictionary and return the action matrix.
 
@@ -167,13 +206,15 @@ def build_action_matrix_from_kfs(kfs):
     Raises:
       ValueError when no valid path can be found.
     """
-    path = meilin.plan_path(kfs)
+    task_type = normalize_task_type(task_type)
+    planner = get_task_planner(task_type)
+    path = planner.plan_path(kfs)
     if not path:
         raise ValueError("当前 KFS 布局下未找到可行路径")
-    return path_to_action_matrix(kfs, path), path
+    return path_to_action_matrix(kfs, path, task_type=task_type), path
 
 
-def build_action_matrix_from_qr(qr_string):
+def build_action_matrix_from_qr(qr_string, task_type=TASK_CHALLENGE):
     """
     Convert a QR payload directly into an action matrix.
 
@@ -181,7 +222,7 @@ def build_action_matrix_from_qr(qr_string):
       action_matrix, path, kfs
     """
     kfs = qr_to_kfs(qr_string)
-    action_matrix, path = build_action_matrix_from_kfs(kfs)
+    action_matrix, path = build_action_matrix_from_kfs(kfs, task_type=task_type)
     return action_matrix, path, kfs
 
 
@@ -194,12 +235,7 @@ def print_action_matrix(action_matrix):
     print("\n[动作序列说明]")
     for index, row in enumerate(np.asarray(action_matrix, dtype=int), start=1):
         from_pos, to_pos, move_dir, height_action, grab_action = row.tolist()
-        if height_action == 1:
-            stair_text = "上台阶"
-        elif height_action == 2:
-            stair_text = "下台阶"
-        else:
-            stair_text = "无台阶动作"
+        stair_text = "需要上下楼梯" if height_action == 1 else "不用上下楼梯"
 
         print(
             f"{index:02d}. {from_pos}->{to_pos} | "
