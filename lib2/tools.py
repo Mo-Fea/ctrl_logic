@@ -346,16 +346,16 @@ def stair_id_to_direction(from_id, to_id, stair_matrix=None, exit_on_error=True)
       3: -90度方向 / 右
       4: 后方 / 180度方向
 
-    默认读取 module.get_stair_matrix()，并使用矩阵中的真实 x/y 坐标判断，
+    默认读取 position_resource.get_stair_matrix()，并使用矩阵中的真实 x/y 坐标判断，
     不依赖编号是否连续，因此 3 和 4 这种跨行编号不会被误判为左右相邻。
     """
     from_id = int(from_id)
     to_id = int(to_id)
 
     if stair_matrix is None:
-        from lib2 import module
+        from lib2 import position_resource
 
-        stair_matrix = module.get_stair_matrix()
+        stair_matrix = position_resource.get_stair_matrix()
 
     positions = {}
     for row in stair_matrix:
@@ -398,9 +398,9 @@ def stair_id_to_matrix_index(stair_id, stair_matrix=None, exit_on_error=True):
     """
     stair_id = int(stair_id)
     if stair_matrix is None:
-        from lib2 import module
+        from lib2 import position_resource
 
-        stair_matrix = module.get_stair_matrix()
+        stair_matrix = position_resource.get_stair_matrix()
 
     for index, row in enumerate(stair_matrix):
         if int(row[0]) == stair_id:

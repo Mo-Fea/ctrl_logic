@@ -8,7 +8,8 @@
 - `lib2/position_backend.py`：位姿后端选择，`1=odin`，`2=mid360`；当前坐标配置跟随后端切换。
 - `lib2/position_odin.py`：odin 后端，基于 `/tf`；维护 odin 对应的梅林入口、入口前点、weapon 目标点和外参。
 - `lib2/position_mid360.py`：mid360 后端，基于 `/lio/robo/odom` 和 `/lio/odom`；维护 mid360 对应的梅林入口、入口前点、weapon 目标点和外参。
-- `lib2/module.py`：初始化、位置线程、里程计线程、组合动作封装；当前已新增 KFS 吸取并存储组合流程。
+- `lib2/position_resource.py`：位置/里程计资源层；维护当前 `position_lib`、台阶矩阵/坐标查询、`PositionRuntime`、`OdomRuntime`、位置线程和 odom 线程启动。
+- `lib2/module.py`：初始化和组合动作封装；保留 `module.start_position_thread()` / `module.start_odometry_thread()` 等兼容包装，但真实资源实现已在 `position_resource.py`。
 - `lib2/move.py`：阻塞旋转、移动到点、倒退到点、上下台阶、KFS 吸盘机械臂姿态等底层动作。
 - `utils/meilin.py`：梅林 12 格路径规划，0-1 BFS，返回路径。
 - `utils/route.py`：D435i 扫二维码、调用规划、打印动作矩阵、可视化，有 OpenCV/matplotlib GUI。
@@ -44,12 +45,12 @@ position_backend.LIDAR_TYPE_MID360 = 2
 启动主流程时应通过 `module.init(lidar_type=...)` 选择后端。`module.init()` 内部会调用 `module.configure_position_backend(lidar_type)`，同时刷新：
 
 ```text
-module.position_lib
+position_resource.position_lib
 move.position_lib
-module.STAIR_HEIGHT_RELATION_MATRIX 兼容快照
+position_resource.STAIR_HEIGHT_RELATION_MATRIX 兼容快照
 ```
 
-不要只调用 `position_backend.set_lidar_type()` 后就直接跑动作；`module.py` 和 `move.py` 都缓存了 `position_lib`，必须用 `configure_position_backend()` 或 `module.init()` 统一刷新。
+不要只调用 `position_backend.set_lidar_type()` 后就直接跑动作；`position_resource.py` 和 `move.py` 都缓存了 `position_lib`，必须用 `module.configure_position_backend()` 或 `module.init()` 统一刷新。`module.py` 里有 `__getattr__` 兼容层，旧代码读取 `module.position_lib`、`module.PositionRuntime`、`module.OdomRuntime` 时会转到 `position_resource`，但新代码应优先直接理解资源状态在 `position_resource.py`。
 
 当前坐标源：
 
@@ -71,7 +72,7 @@ lib2/position_mid360.py:
   WEAPON_RETREAT_STOP_Y = 4.00
 ```
 
-`lib2/module.py` 顶部保留的 `ENTRANCE_X/Y`、`PRE_ENTRANCE_X/Y`、`STAIR_SIDE_LENGTH` 只是后端缺字段时的 fallback；主流程不应把它们当成当前真实坐标。读取坐标时优先用：
+`lib2/position_resource.py` 顶部保留的 `ENTRANCE_X/Y`、`PRE_ENTRANCE_X/Y`、`STAIR_SIDE_LENGTH` 只是后端缺字段时的 fallback；主流程不应把它们当成当前真实坐标。读取坐标时优先用：
 
 ```python
 module.get_entrance_x()
@@ -81,6 +82,8 @@ module.get_pre_entrance_y()
 module.get_stair_side_length()
 module.get_stair_matrix()
 ```
+
+这些 `module.*` 坐标函数当前只是薄包装，真实实现都在 `position_resource.py`。业务层继续用 `module.get_stair_xy()` 等兼容入口即可；资源层或工具层可以直接用 `position_resource.get_stair_xy()`。
 
 `WEAPON_TARGETS` 和 `WEAPON_RETREAT_STOP_Y` 也从当前 `position_lib` 读取，因此切换雷达后 weapon 抓取目标点会一起切换。
 
@@ -366,10 +369,10 @@ stop_distance = 0.02m
 
 ## 台阶矩阵与编号工具
 
-`module.get_stair_matrix()` 会按当前 position 后端的入口坐标动态生成梅林台阶矩阵。也就是说 odin 和 mid360 会得到不同的 `x/y`，但台阶编号和高低关系结构一致。矩阵当前多了梅林入口前点，第一列不是连续 `1..14`：
+`position_resource.get_stair_matrix()` 会按当前 position 后端的入口坐标动态生成梅林台阶矩阵；`module.get_stair_matrix()` 是兼容包装。也就是说 odin 和 mid360 会得到不同的 `x/y`，但台阶编号和高低关系结构一致。矩阵当前多了梅林入口前点，第一列不是连续 `1..14`：
 
 ```text
-[-1, 2, 0, 0, PRE_ENTRANCE_X, PRE_ENTRANCE_Y]  # 入口前点
+[-1, 1, 0, 0, PRE_ENTRANCE_X, PRE_ENTRANCE_Y]  # 入口前点
 [1..13, ...]                   # 正常梅林格
 [15, 0, 0, 2, ..., ...]        # 原右下出口侧编号现为 15
 ```
@@ -397,12 +400,12 @@ stair_id=1..13/15: 当前后端的 ENTRANCE_X/Y + STAIR_SIDE_LENGTH 网格偏移
 
 新增工具函数：
 
-- `tools.stair_id_to_matrix_index(stair_id, stair_matrix=None, exit_on_error=True)`：按第一列编号遍历查矩阵 0-based 行号；未传 `stair_matrix` 时默认读取 `module.get_stair_matrix()`，例如 `-1 -> 0`、`1 -> 1`、`15 -> 14`。
+- `tools.stair_id_to_matrix_index(stair_id, stair_matrix=None, exit_on_error=True)`：按第一列编号遍历查矩阵 0-based 行号；未传 `stair_matrix` 时默认读取 `position_resource.get_stair_matrix()`，例如 `-1 -> 0`、`1 -> 1`、`15 -> 14`。
 - `tools.stair_id_to_direction(from_id, to_id, stair_matrix=None, exit_on_error=True)`：按矩阵真实 `x/y` 判断 `to_id` 在 `from_id` 的方向，返回 `1/2/3/4`，不相邻返回 `0` 或退出。
-- `module.get_stair_matrix_row(stair_id)` / `module.get_stair_xy(stair_id)`：按编号查矩阵行和中心坐标。
-- `module.get_stair_height_relation(stair_id, direction)`：按编号和方向取高低关系；`direction=1/2/3` 直接读矩阵列，`direction=4` 通过反查后方相邻格推导。
+- `position_resource.get_stair_matrix_row(stair_id)` / `position_resource.get_stair_xy(stair_id)`：按编号查矩阵行和中心坐标；`module` 中保留同名兼容包装。
+- `position_resource.get_stair_height_relation(stair_id, direction)`：按编号和方向取高低关系；`direction=1/2/3` 直接读矩阵列，`direction=4` 通过反查后方相邻格推导；`module` 中保留同名兼容包装。
 
-不要再写 `STAIR_HEIGHT_RELATION_MATRIX[stair_id - 1]`，也不要在业务代码里直接依赖 `module.ENTRANCE_X/Y`。新增 `-1` 和 `15` 后，下标会错；切换雷达后，静态全局坐标也可能不是当前后端坐标。主流程应调用 `module.get_stair_matrix()` / `module.get_stair_xy()` 读取当前后端的实时矩阵。
+不要再写 `STAIR_HEIGHT_RELATION_MATRIX[stair_id - 1]`，也不要在业务代码里直接依赖 fallback `ENTRANCE_X/Y`。新增 `-1` 和 `15` 后，下标会错；切换雷达后，静态全局坐标也可能不是当前后端坐标。主流程应调用 `module.get_stair_matrix()` / `module.get_stair_xy()` 或 `position_resource` 对应函数读取当前后端的实时矩阵。
 
 `module.adjust_position(...)` 当前接口已经从输入 `current_x/current_y` 改为输入 `stair_id`：
 
@@ -591,10 +594,12 @@ def execute_action_matrix(sender, position_runtime, odom_runtime, action_matrix,
 推荐分层：
 
 ```text
-utils/utils.py         只负责二维码/KFS -> action_matrix
-主任务脚本             启动规划线程或直接生成 action_matrix，再调用 module 执行
-lib2/module.py         只负责解释 action_matrix 并调用已有动作封装
-lib2/move.py           只负责底层阻塞动作
+utils/process.py           只负责 D435i/二维码通用处理
+utils/utils.py             只负责二维码/KFS -> action_matrix
+主任务脚本                 启动规划线程或直接生成 action_matrix，再调用 module 执行
+lib2/position_resource.py  只负责 position/odom 资源线程、当前后端资源、台阶矩阵/坐标查询
+lib2/module.py             只负责解释 action_matrix 并调用已有组合动作；资源入口保留兼容包装
+lib2/move.py               只负责底层阻塞动作
 ```
 
 一次性生成动作矩阵时，若要线程传递结果，推荐 `queue.Queue(maxsize=1)`，不要裸全局变量。生成线程 `put(action_matrix)`，主任务 `get()` 阻塞等待后执行。
@@ -603,14 +608,42 @@ lib2/move.py           只负责底层阻塞动作
 
 当前窗口的主线是继续封装 `lib2/module.py` 的动作矩阵执行层，并保持 `utils/race.py` 的规划规则稳定。当前状态：
 
-- `utils/race.py`：当前主线路径规划，维护台阶编号、邻接、高度、R1/R2/fake KFS 约束；方向语义与 `lib2/module.py` 的梅林矩阵一致。
-- `utils/meilin.py`：旧规划版本，保留作参考，不再作为无 GUI 主入口。
-- `utils/route1.py`：带 D435i/GUI 的新版扫描和动作矩阵生成入口，基于 `race.py`。
-- `utils/route.py`：仍是带 D435i/GUI 的旧入口，历史代码中仍有 `meilin.py` 语义，后续使用前要确认是否还需要维护。
-- `utils/utils.py`：无 GUI 工具入口，已从旧 `meilin.py` 切到新版 `race.py`，负责 `qr/kfs/path -> action_matrix`；主任务优先调用这里，不要把执行动作写进 utils。
+- `utils/race.py`：挑战赛路径规划，维护 2 个 R1、2 个 R2、fake KFS 等约束；方向语义与 `lib2/module.py` 的梅林矩阵一致。
+- `utils/meilin.py`：对抗赛路径规划，保留更多 KFS 的旧规则语义；后续会与 `combat_lib.py` 一起整理成对抗赛库。
+- `utils/route1.py`：挑战赛 D435i/GUI 入口，基于 `race.py`；后续会逐步封装为库，不再作为最终主运行入口。
+- `utils/route.py`：对抗赛 D435i/GUI 入口，基于 `meilin.py`；后续会逐步封装为库，不再作为最终主运行入口。
+- `utils/utils.py`：无 GUI 工具入口，当前通过 `task_type` 区分 `challenge/race/route1/挑战赛` 和 `combat/meilin/route/对抗赛`，负责 `qr/kfs/path -> action_matrix`；主任务优先调用这里，不要把执行动作写进 utils。
 - `lib2/tools.py`：方向码、台阶编号到矩阵下标、台阶编号到相邻方向等通用工具。
-- `lib2/module.py`：动作解释和组合动作封装层。`execute_action_row()` 应只解释矩阵并调用已有组合动作；不要在这里重写 TCP 协议或底层通道细节。
+- `lib2/position_resource.py`：资源层，负责当前 `position_lib`、后端相关台阶坐标/矩阵、`PositionRuntime`、`OdomRuntime`、位置线程和 odom 线程。`tools.py` 默认读取这里的台阶矩阵，避免 `lib2` 内部为了资源反向依赖 `module.py`。
+- `lib2/module.py`：动作解释和组合动作封装层。`execute_action_row()` 应只解释矩阵并调用已有组合动作；不要在这里重写 TCP 协议、底层通道细节或资源线程实现。
 - `lib2/move.py`：底层阻塞动作和通道时序，例如旋转、移动、上下楼底层触发、KFS 姿态触发。
+
+### 资源层拆分状态
+
+当前已把 position/odom 资源相关代码从 `lib2/module.py` 拆到 `lib2/position_resource.py`：
+
+```text
+position_resource.py:
+  position_lib
+  configure_position_backend()
+  get_stair_matrix() / get_stair_xy() / get_stair_height_relation()
+  PositionRuntime / start_position_thread()
+  OdomRuntime / start_odometry_thread()
+```
+
+`module.py` 保留兼容入口：
+
+```python
+module.start_position_thread(...)
+module.start_odometry_thread(...)
+module.get_stair_matrix()
+module.get_stair_xy(stair_id)
+module.get_stair_height_relation(stair_id, direction)
+```
+
+`module.configure_position_backend(lidar_type)` 当前会先刷新 `position_resource.position_lib`，再刷新 `move.position_lib`。不要直接调用 `position_backend.set_lidar_type()` 后启动位置线程或动作；这样会绕过资源同步。
+
+`module.py` 还提供 `__getattr__` 兼容层，旧代码读取 `module.position_lib`、`module.STAIR_HEIGHT_RELATION_MATRIX`、`module.PositionRuntime`、`module.OdomRuntime` 时会转到 `position_resource`。新代码不应在 `module.py` 里新增第二份资源全局变量。
 
 当前方向动作分支已开始复用：
 
@@ -645,7 +678,9 @@ grab_action         1=抓取，0=不抓取；当前矩阵生成层只输出 0/1
 当前验证状态：
 
 - 已运行 `python3 -m py_compile lib2/module.py`。
+- 已运行 `python3 -m py_compile lib2/position_resource.py lib2/module.py lib2/tools.py lib2/move.py`。
 - 已运行 `python3 -m py_compile utils/utils.py`。
+- 已做资源层 smoke test：`module.get_stair_xy(2)` 与 `position_resource.get_stair_xy(2)` 一致，且 `module.position_lib is position_resource.position_lib` 为 `True`。
 - 已用 `build_action_matrix_from_qr("000020020200")` 做过一次无 GUI 生成检查，确认 `height_action` 和 `grab_action` 都只输出 `0/1`。
 - `execute_action_row()` 的真实硬件动作分支尚未实机验证。
 

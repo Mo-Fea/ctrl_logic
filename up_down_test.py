@@ -20,9 +20,9 @@ SECOND_CLIMB_DIRECTION_1 = 2
 SECOND_CLIMB_DIRECTION_2 = 2
 SECOND_CLIMB_TARGET_ID = 1
 
-DESCEND_DIRECTION_1 = 3
-DESCEND_DIRECTION_2 = 1
-DESCEND_TARGET_ID = 2
+KFS_GRAB_STAIR_ID = 1
+KFS_GRAB_TARGET_ID = 2
+KFS_FINAL_DIRECTION = 1
 
 HOLD_AFTER_DONE_SEC = 10.0
 
@@ -158,28 +158,28 @@ def main():
         print("Second climb finished.")
         print(second_climb_result)
 
-        descend_target_x, descend_target_y = get_stair_xy(DESCEND_TARGET_ID)
+        grab_direction = tools.stair_id_to_direction(KFS_GRAB_STAIR_ID, KFS_GRAB_TARGET_ID)
+        grab_height_relation = module.get_stair_height_relation(KFS_GRAB_STAIR_ID, grab_direction)
+        grab_pose_id = module.kfs_pose_id_from_height_relation(grab_height_relation)
+        grab_final_yaw = tools.direction_int_to_yaw_deg(KFS_FINAL_DIRECTION)
         print(
-            f"Descend | directions=({DESCEND_DIRECTION_1}, {DESCEND_DIRECTION_2}) | "
-            f"current=({second_target_x:.2f}, {second_target_y:.2f}) | "
-            f"target_id={DESCEND_TARGET_ID} target=({descend_target_x:.2f}, {descend_target_y:.2f})"
+            f"KFS grab | from={KFS_GRAB_STAIR_ID} to={KFS_GRAB_TARGET_ID} | "
+            f"direction={grab_direction} | height_relation={grab_height_relation} | "
+            f"pose_id={grab_pose_id} | final_yaw={grab_final_yaw:.2f} deg"
         )
-        descend_result = module.descend(
+        grab_result = module.fetch_and_store_kfs(
             sender=sender,
             position_runtime=position_runtime,
             odom_runtime=odom_runtime,
-            direction1=DESCEND_DIRECTION_1,
-            direction2=DESCEND_DIRECTION_2,
-            current_x=second_target_x,
-            current_y=second_target_y,
-            des_x=descend_target_x,
-            des_y=descend_target_y,
+            stair_id=KFS_GRAB_STAIR_ID,
+            direction=grab_direction,
+            final_target_yaw_deg=grab_final_yaw,
             move_speed=TARGET_SPEED,
         )
-        print("Descend finished.")
-        print(descend_result)
+        print("KFS grab finished.")
+        print(grab_result)
 
-        hold_yaw = tools.direction_int_to_yaw_deg(DESCEND_DIRECTION_2)
+        hold_yaw = grab_final_yaw
         print(f"Hold still for {HOLD_AFTER_DONE_SEC:.1f}s before shutdown...")
         hold_result = move.wait_with_target_yaw(
             sender=sender,

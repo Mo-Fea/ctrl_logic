@@ -34,7 +34,7 @@ def set_channels_for_duration(
         tools.time.sleep(loop_interval_sec)
 
 
-def stop_chassis(sender, des_yaw_i16=0):
+ def stop_chassis(sender, des_yaw_i16=0):
     channels = tools.compose_channels(lateral_cmd=0, forward_cmd=0, rotation_cmd=0)
     sender.set_channels_and_des_yaw_i16(channels, des_yaw_i16)
     return channels
