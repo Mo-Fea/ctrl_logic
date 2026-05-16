@@ -18,7 +18,7 @@ FIXED_YAW_DEG = 0.01
 
 MAX_MOVE_CMD = 600
 MIN_MOVE_CMD = 0
-MIN_ACTIVE_MOVE_CMD = 120
+MIN_ACTIVE_MOVE_CMD = 180
 STOP_DISTANCE = 0.03
 STOP_SPEED_MPS = 0.06
 YAW_GATE_DEG = 2.0
@@ -184,12 +184,13 @@ def move_to_target_vector_pid(
                 lateral_cmd = 0.0
                 forward_cmd = 0.0
 
-            channels = tools.compose_channels(
+            channels = move.set_motion_channels(
+                sender,
                 lateral_cmd=round(clamp(lateral_cmd_sign * lateral_cmd, -max_cmd, max_cmd)),
                 forward_cmd=round(clamp(forward_cmd_sign * forward_cmd, -max_cmd, max_cmd)),
                 rotation_cmd=0,
+                des_yaw_i16=des_yaw_i16,
             )
-            sender.set_channels_and_des_yaw_i16(channels, des_yaw_i16)
 
             last_result = {
                 "current_x": current_x,
@@ -238,8 +239,7 @@ def move_to_target_vector_pid(
                 )
 
             if distance <= float(stop_distance) and linear_speed_mps <= float(stop_speed_mps):
-                stop_channels = tools.compose_channels()
-                sender.set_channels_and_des_yaw_i16(stop_channels, des_yaw_i16)
+                stop_channels = move.set_motion_channels(sender, des_yaw_i16=des_yaw_i16)
                 last_result["completed"] = True
                 last_result["channels"] = stop_channels
                 return last_result
@@ -249,8 +249,7 @@ def move_to_target_vector_pid(
             loop_count += 1
 
         if deadline is not None and time.time() >= deadline:
-            stop_channels = tools.compose_channels()
-            sender.set_channels_and_des_yaw_i16(stop_channels, des_yaw_i16)
+            stop_channels = move.set_motion_channels(sender, des_yaw_i16=des_yaw_i16)
             if last_result is None:
                 return None
             last_result["timed_out"] = True
@@ -301,10 +300,9 @@ def main():
                 print("Vector PID sequence stopped before remaining waypoints.")
                 return
 
-        stop_channels = tools.compose_channels()
-        sender.set_channels_and_des_yaw_i16(
-            stop_channels,
-            move.encode_target_yaw_i16(FIXED_YAW_DEG),
+        stop_channels = move.set_motion_channels(
+            sender,
+            des_yaw_i16=move.encode_target_yaw_i16(FIXED_YAW_DEG),
         )
         print("Vector PID move sequence completed.")
         print(results)

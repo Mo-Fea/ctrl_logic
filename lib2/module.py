@@ -8,7 +8,7 @@ from lib2 import position_resource
 
 
 ODOM_TOPIC = position_resource.ODOM_TOPIC
-PRE_DESCEND_ADJUST_DISTANCE = 0.0 #m
+PRE_DESCEND_ADJUST_DISTANCE = 0.3 #m
 KFS_SUCTION_CHANNEL_INDEX = 4
 KFS_MODE_CHANNEL_INDEX = 5
 KFS_POSE_CHANNEL_INDEX = 6
@@ -271,12 +271,9 @@ def move_to_des(
 ):
     """
     组合动作：
-    1. 先根据当前 reference 参考点位置计算目标点方向绝对航向角
-    2. 设置一次目标航向角
-    3. 阻塞旋转到该目标航向角（默认 +-5deg）
-    4. 设置一次前进速度起步
-    5. 调用 move.move_to_target(...) 阻塞移动到目标点
-    6. target_deg 不是 None 时，阻塞等待最终航向进入阈值范围
+    1. 等待当前 reference 参考点位姿可用
+    2. 调用 move.move_to_target(...) 以 target_deg 作为移动过程目标航向阻塞移动到目标点
+    3. target_deg 不是 None 时，阻塞等待最终航向进入阈值范围
        target_deg 为 None 时，到点后停止旋转控制，不做最终旋转
     """
     reference = str(reference).lower()
@@ -294,36 +291,6 @@ def move_to_des(
 
     if current_pose is None:
         return None
-
-    position_lib = position_resource.get_position_lib()
-    initial_target_yaw_deg = position_lib.cal_target_yaw_deg(
-        target_x=x,
-        target_y=y,
-        robot_x=current_pose["x"],
-        robot_y=current_pose["y"],
-    )
-
-    zero_channels = tools.compose_channels(lateral_cmd=0, forward_cmd=0, rotation_cmd=0)
-    sender.set_channels_and_des_yaw_i16(
-        zero_channels,
-        move_lib.encode_target_yaw_i16(initial_target_yaw_deg),
-    )
-
-    rotate_result = move_lib.rotate_to_target_yaw_segmented(
-        sender=sender,
-        position_runtime=position_runtime,
-        target_yaw_deg=initial_target_yaw_deg,
-        tolerance_deg=rotate_tolerance_deg,
-        timeout_sec=_remaining_timeout_sec(total_deadline),
-    )
-    if rotate_result is None or rotate_result.get("timed_out"):
-        return None
-
-    start_channels = tools.compose_channels(lateral_cmd=0, forward_cmd=int(v), rotation_cmd=0)
-    sender.set_channels_and_des_yaw_i16(
-        start_channels,
-        move_lib.encode_target_yaw_i16(initial_target_yaw_deg),
-    )
 
     move_result = move_lib.move_to_target(
         sender=sender,
@@ -345,11 +312,10 @@ def move_to_des(
 
     final_direction_result = None
     if target_deg is not None:
-        final_direction_result = move_lib.rotate_to_target_yaw_segmented(
-            sender=sender,
+        final_direction_result = move_lib.wait_until_direction_reached(
             position_runtime=position_runtime,
             target_yaw_deg=target_deg,
-            tolerance_deg=move_lib.DEFAULT_DIRECTION_THRESHOLD_DEG,
+            threshold_deg=move_lib.DEFAULT_DIRECTION_THRESHOLD_DEG,
             timeout_sec=(
                 _remaining_timeout_sec(total_deadline)
                 if total_deadline is not None
@@ -360,9 +326,10 @@ def move_to_des(
             return None
 
     return {
-        "initial_target_yaw_deg": float(initial_target_yaw_deg),
+        "target_yaw_deg": None if target_deg is None else float(move_lib.normalize_yaw_deg(target_deg)),
+        "fixed_yaw_deg": None if target_deg is None else float(move_lib.normalize_yaw_deg(target_deg)),
         "reference": reference,
-        "rotate_result": rotate_result,
+        "rotate_result": None,
         "move_result": move_result,
         "final_direction_result": final_direction_result,
     }
@@ -385,12 +352,9 @@ def move_backward_to_des(
 ):
     """
     组合式倒退到点动作：
-    1. 先根据当前 reference 参考点位置计算目标点方向绝对航向角
-    2. 初始航向取目标点方向 + 180deg，使车尾正对目标点
-    3. 阻塞旋转到该倒退航向角（默认 +-5deg）
-    4. 设置一次负 ch2 起步
-    5. 调用 move.move_backward_to_target(...) 阻塞倒退移动到目标点
-    6. target_deg 不是 None 时，按原始 target_deg 阻塞旋转到最终航向；
+    1. 等待当前 reference 参考点位姿可用
+    2. 调用 move.move_backward_to_target(...)，移动过程目标航向为 target_deg + 180deg
+    3. target_deg 不是 None 时，按原始 target_deg 阻塞等待最终航向；
        target_deg 为 None 时，到点后停止旋转控制，不做最终旋转
     """
     reference = str(reference).lower()
@@ -409,40 +373,7 @@ def move_backward_to_des(
     if current_pose is None:
         return None
 
-    position_lib = position_resource.get_position_lib()
-    initial_target_direction_deg = position_lib.cal_target_yaw_deg(
-        target_x=x,
-        target_y=y,
-        robot_x=current_pose["x"],
-        robot_y=current_pose["y"],
-    )
-    initial_backward_yaw_deg = move_lib.normalize_yaw_deg(
-        initial_target_direction_deg + 180.0
-    )
-
-    zero_channels = tools.compose_channels(lateral_cmd=0, forward_cmd=0, rotation_cmd=0)
-    sender.set_channels_and_des_yaw_i16(
-        zero_channels,
-        move_lib.encode_target_yaw_i16(initial_backward_yaw_deg),
-    )
-
-    rotate_result = move_lib.rotate_to_target_yaw_segmented(
-        sender=sender,
-        position_runtime=position_runtime,
-        target_yaw_deg=initial_backward_yaw_deg,
-        tolerance_deg=rotate_tolerance_deg,
-        timeout_sec=_remaining_timeout_sec(total_deadline),
-    )
-    if rotate_result is None or rotate_result.get("timed_out"):
-        return None
-
     backward_cmd = -abs(int(v))
-    start_channels = tools.compose_channels(lateral_cmd=0, forward_cmd=backward_cmd, rotation_cmd=0)
-    sender.set_channels_and_des_yaw_i16(
-        start_channels,
-        move_lib.encode_target_yaw_i16(initial_backward_yaw_deg),
-    )
-
     move_result = move_lib.move_backward_to_target(
         sender=sender,
         position_runtime=position_runtime,
@@ -463,11 +394,10 @@ def move_backward_to_des(
 
     final_direction_result = None
     if target_deg is not None:
-        final_direction_result = move_lib.rotate_to_target_yaw_segmented(
-            sender=sender,
+        final_direction_result = move_lib.wait_until_direction_reached(
             position_runtime=position_runtime,
             target_yaw_deg=target_deg,
-            tolerance_deg=move_lib.DEFAULT_DIRECTION_THRESHOLD_DEG,
+            threshold_deg=move_lib.DEFAULT_DIRECTION_THRESHOLD_DEG,
             timeout_sec=(
                 _remaining_timeout_sec(total_deadline)
                 if total_deadline is not None
@@ -478,10 +408,12 @@ def move_backward_to_des(
             return None
 
     return {
-        "initial_target_direction_deg": float(initial_target_direction_deg),
-        "initial_backward_yaw_deg": float(initial_backward_yaw_deg),
+        "target_yaw_deg": None if target_deg is None else float(move_lib.normalize_yaw_deg(target_deg)),
+        "backward_target_yaw_deg": None if target_deg is None else float(move_lib.normalize_yaw_deg(target_deg + 180.0)),
+        "fixed_yaw_deg": None if target_deg is None else float(move_lib.normalize_yaw_deg(target_deg)),
+        "backward_fixed_yaw_deg": None if target_deg is None else float(move_lib.normalize_yaw_deg(target_deg + 180.0)),
         "reference": reference,
-        "rotate_result": rotate_result,
+        "rotate_result": None,
         "move_result": move_result,
         "final_direction_result": final_direction_result,
     }
@@ -581,15 +513,10 @@ def adjust_position(
             target_yaw_deg=target_deg,
             timeout_sec=final_direction_timeout_sec,
         )
-        forward_channels = tools.compose_channels(
-            lateral_cmd=0,
-            forward_cmd=200,
-            rotation_cmd=0,
-        )
         drive_result = move_lib.drive_with_channels_for_duration(
             sender=sender,
-            channels=forward_channels,
             duration_sec=2.0,
+            forward_cmd=200,
             target_yaw_deg=target_deg,
             brake_reverse_cmd=0,
             brake_duration_sec=0.0,
@@ -689,13 +616,13 @@ def kfs_pose_id_from_height_relation(height_relation):
     sys.exit(1)
 
 
-def _kfs_suction_channels(suction_value, pose_id=1, trigger_value=KFS_TRIGGER_IDLE_VALUE):
-    channels = tools.compose_channels(lateral_cmd=0, forward_cmd=0, rotation_cmd=0)
-    channels[KFS_SUCTION_CHANNEL_INDEX] = int(suction_value)
-    channels[KFS_MODE_CHANNEL_INDEX] = KFS_MODE_VALUE
-    channels[KFS_POSE_CHANNEL_INDEX] = int(pose_id)
-    channels[KFS_TRIGGER_CHANNEL_INDEX] = int(trigger_value)
-    return channels
+def _kfs_suction_channel_values(suction_value, pose_id=1, trigger_value=KFS_TRIGGER_IDLE_VALUE):
+    return {
+        KFS_SUCTION_CHANNEL_INDEX: int(suction_value),
+        KFS_MODE_CHANNEL_INDEX: KFS_MODE_VALUE,
+        KFS_POSE_CHANNEL_INDEX: int(pose_id),
+        KFS_TRIGGER_CHANNEL_INDEX: int(trigger_value),
+    }
 
 
 def set_kfs_suction(
@@ -715,19 +642,19 @@ def set_kfs_suction(
     arm_value = KFS_SUCTION_OFF_VALUE if suction_on else KFS_SUCTION_ON_VALUE
     fire_value = KFS_SUCTION_ON_VALUE if suction_on else KFS_SUCTION_OFF_VALUE
 
-    arm_channels = _kfs_suction_channels(arm_value, pose_id=pose_id)
+    arm_channel_values = _kfs_suction_channel_values(arm_value, pose_id=pose_id)
     arm_deadline = time.time() + float(edge_arm_sec)
     while time.time() < arm_deadline:
-        sender.set_channels_and_des_yaw_i16(arm_channels, 0)
+        arm_channels = move_lib.set_channel_values(sender, channel_values=arm_channel_values)
         time.sleep(float(loop_interval_sec))
 
-    fire_channels = _kfs_suction_channels(fire_value, pose_id=pose_id)
+    fire_channel_values = _kfs_suction_channel_values(fire_value, pose_id=pose_id)
     fire_deadline = time.time() + float(edge_hold_sec)
     while time.time() < fire_deadline:
-        sender.set_channels_and_des_yaw_i16(fire_channels, 0)
+        fire_channels = move_lib.set_channel_values(sender, channel_values=fire_channel_values)
         time.sleep(float(loop_interval_sec))
 
-    sender.set_channels_and_des_yaw_i16(fire_channels, 0)
+    fire_channels = move_lib.set_channel_values(sender, channel_values=fire_channel_values)
     return {
         "suction_on": bool(suction_on),
         "pose_id": int(pose_id),
@@ -745,12 +672,12 @@ def wait_with_kfs_suction(
     pose_id=1,
     loop_interval_sec=0.02,
 ):
-    channels = _kfs_suction_channels(KFS_SUCTION_ON_VALUE, pose_id=pose_id)
+    channel_values = _kfs_suction_channel_values(KFS_SUCTION_ON_VALUE, pose_id=pose_id)
     deadline = time.time() + float(duration_sec)
     while time.time() < deadline:
-        sender.set_channels_and_des_yaw_i16(channels, 0)
+        channels = move_lib.set_channel_values(sender, channel_values=channel_values)
         time.sleep(float(loop_interval_sec))
-    sender.set_channels_and_des_yaw_i16(channels, 0)
+    channels = move_lib.set_channel_values(sender, channel_values=channel_values)
     return {
         "channels": channels,
         "duration_sec": float(duration_sec),
@@ -863,6 +790,15 @@ def fetch_and_store_kfs(
         target_deg=final_target_yaw_deg,
         v=move_speed,
     )
+    reset_kfs_channels = move_lib.set_channel_values(
+        sender,
+        channel_values={
+            KFS_SUCTION_CHANNEL_INDEX: KFS_SUCTION_OFF_VALUE,
+            KFS_MODE_CHANNEL_INDEX: tools.SAFE_SWITCH_VALUE,
+            KFS_POSE_CHANNEL_INDEX: tools.SAFE_SWITCH_VALUE,
+            KFS_TRIGGER_CHANNEL_INDEX: tools.SAFE_SWITCH_VALUE,
+        },
+    )
 
     return {
         "completed": return_move_result is not None,
@@ -882,6 +818,7 @@ def fetch_and_store_kfs(
         "release_result": release_result,
         "zero_pose_result": zero_pose_result,
         "return_move_result": return_move_result,
+        "reset_kfs_channels": reset_kfs_channels,
     }
 
 
@@ -891,33 +828,31 @@ def fetch_weapon(
     odom_runtime,
     weapon_id,
     v=600,
-    final_target_yaw_deg=0.01,
+    final_target_yaw_deg=90.0,
     weapon_mode_settle_sec=0.3,
     grab_arm_sec=0.3,
     grab_hold_sec=1.0,
     lift_hold_sec=1.0,
     first_rotate_yaw_deg=90.0,
-    retreat_forward_cmd=-100,
-    retreat_stop_y=None,
-    retreat_timeout_sec=None,
-    final_rotate_yaw_deg=-90.0,
-    retreat_loop_interval_sec=0.02,
+    intermediate_move_yaw_deg=90.0,
+    intermediate_move_x=-2.4,
+    intermediate_move_y=-1.2,
+    final_move_yaw_deg=-90.0,
+    final_move_x=-2.4,
+    final_move_y=-2.4,
+    release_after_final_wait_sec=5.0,
+    release_edge_arm_sec=0.3,
+    release_edge_hold_sec=0.3,
 ):
     """
     根据 weapon_id 选择目标点，移动 weapon/夹爪到目标点后执行夹取并抬起。
 
     weapon_id 对应目标点从当前 position 后端的 WEAPON_TARGETS 读取。
-    retreat_stop_y 默认从当前 position 后端的 WEAPON_RETREAT_STOP_Y 读取；
-    调用时显式传入 retreat_stop_y 可临时覆盖。
     """
     position_lib = position_resource.get_position_lib()
     weapon_targets = getattr(position_lib, "WEAPON_TARGETS", None)
     if weapon_targets is None:
         raise AttributeError(f"{position_lib.__name__} must define WEAPON_TARGETS")
-    if retreat_stop_y is None:
-        retreat_stop_y = getattr(position_lib, "WEAPON_RETREAT_STOP_Y", None)
-    if retreat_stop_y is None:
-        raise AttributeError(f"{position_lib.__name__} must define WEAPON_RETREAT_STOP_Y")
 
     weapon_id = int(weapon_id)
     if weapon_id not in weapon_targets:
@@ -927,6 +862,7 @@ def fetch_weapon(
     des_weapon = weapon_targets[weapon_id]
     des_x, des_y = des_weapon
 
+    # 第一段：用 weapon/夹爪参考点，以 90deg 固定航向移动到对应 weapon 目标点。
     move_result = move_lib.move_to_target(
         sender=sender,
         position_runtime=position_runtime,
@@ -939,12 +875,16 @@ def fetch_weapon(
     )
 
     def set_weapon_state(ch1=0, ch4=1, forward_cmd=0, des_yaw_i16=0):
-        channels = tools.compose_channels(lateral_cmd=0, forward_cmd=int(forward_cmd), rotation_cmd=0)
-        channels[5] = 3
-        channels[4] = int(ch4)
-        channels[1] = int(ch1)
-        sender.set_channels_and_des_yaw_i16(channels, int(des_yaw_i16))
-        return channels
+        return move_lib.set_channel_values(
+            sender,
+            des_yaw_i16=int(des_yaw_i16),
+            channel_values={
+                1: int(ch1),
+                2: int(forward_cmd),
+                4: int(ch4),
+                5: 3,
+            },
+        )
 
     mode_channels = set_weapon_state(ch1=0, ch4=1)
     time.sleep(float(weapon_mode_settle_sec))
@@ -958,64 +898,36 @@ def fetch_weapon(
     lift_channels = set_weapon_state(ch1=100, ch4=3)
     time.sleep(float(lift_hold_sec))
 
-    first_rotate_result = move_lib.rotate_to_target_yaw_segmented(
+    # 第二段：保持夹取状态，以 90deg 固定航向正向移动到中间目标点。
+    intermediate_move_result = move_lib.move_to_target(
         sender=sender,
         position_runtime=position_runtime,
-        target_yaw_deg=first_rotate_yaw_deg,
+        odom_runtime=odom_runtime,
+        target_x=intermediate_move_x,
+        target_y=intermediate_move_y,
+        final_target_yaw_deg=intermediate_move_yaw_deg,
+        cruise_forward_cmd=v,
+        reference="robot",
     )
 
-    retreat_started_at = time.time()
-    retreat_deadline = (
-        None
-        if retreat_timeout_sec is None
-        else retreat_started_at + float(retreat_timeout_sec)
-    )
-    retreat_result = None
-    retreat_des_yaw_i16 = move_lib.encode_target_yaw_i16(first_rotate_yaw_deg)
+    intermediate_stop_channels = set_weapon_state(ch1=100, ch4=3, forward_cmd=0)
 
-    while True:
-        weapon_pose = position_runtime.get_weapon_pose()
-        if weapon_pose is not None:
-            weapon_y = float(weapon_pose["y"])
-            retreat_result = {
-                "weapon_y": weapon_y,
-                "retreat_reference": "weapon",
-                "retreat_stop_y": float(retreat_stop_y),
-                "retreat_forward_cmd": int(retreat_forward_cmd),
-                "elapsed_sec": float(time.time() - retreat_started_at),
-            }
-            if weapon_y < float(retreat_stop_y):
-                break
-
-        set_weapon_state(
-            ch1=100,
-            ch4=3,
-            forward_cmd=retreat_forward_cmd,
-            des_yaw_i16=retreat_des_yaw_i16,
-        )
-
-        if retreat_deadline is not None and time.time() >= retreat_deadline:
-            if retreat_result is None:
-                retreat_result = {
-                    "weapon_y": None,
-                    "retreat_reference": "weapon",
-                    "retreat_stop_y": float(retreat_stop_y),
-                    "retreat_forward_cmd": int(retreat_forward_cmd),
-                    "elapsed_sec": float(time.time() - retreat_started_at),
-                }
-            retreat_result["timed_out"] = True
-            break
-
-        time.sleep(float(retreat_loop_interval_sec))
-
-    retreat_stop_channels = set_weapon_state(ch1=100, ch4=3, forward_cmd=0)
-
-    final_rotate_result = move_lib.rotate_to_target_yaw_segmented(
+    # 第三段：保持夹取状态，以 -90deg 固定航向正向移动到最终目标点。
+    final_move_result = move_lib.move_to_target(
         sender=sender,
         position_runtime=position_runtime,
-        target_yaw_deg=final_rotate_yaw_deg,
+        odom_runtime=odom_runtime,
+        target_x=final_move_x,
+        target_y=final_move_y,
+        final_target_yaw_deg=final_move_yaw_deg,
+        cruise_forward_cmd=v,
+        reference="robot",
     )
     final_hold_channels = set_weapon_state(ch1=100, ch4=3, forward_cmd=0)
+    time.sleep(float(release_after_final_wait_sec))
+
+    final_keep_channels = set_weapon_state(ch1=100, ch4=3, forward_cmd=0)
+    time.sleep(float(release_edge_hold_sec))
 
     return {
         "weapon_id": int(weapon_id),
@@ -1035,11 +947,27 @@ def fetch_weapon(
             "lift_hold_sec": float(lift_hold_sec),
             "completed": True,
         },
-        "first_rotate_result": first_rotate_result,
-        "retreat_result": retreat_result,
-        "retreat_stop_channels": retreat_stop_channels,
-        "final_rotate_result": final_rotate_result,
+        "intermediate_move_target": {
+            "x": float(intermediate_move_x),
+            "y": float(intermediate_move_y),
+            "yaw_deg": float(intermediate_move_yaw_deg),
+        },
+        "intermediate_move_result": intermediate_move_result,
+        "intermediate_stop_channels": intermediate_stop_channels,
+        "final_move_target": {
+            "x": float(final_move_x),
+            "y": float(final_move_y),
+            "yaw_deg": float(final_move_yaw_deg),
+        },
+        "final_move_result": final_move_result,
         "final_hold_channels": final_hold_channels,
+        "keep_result": {
+            "wait_sec": float(release_after_final_wait_sec),
+            "channels": final_keep_channels,
+            "edge_arm_sec": float(release_edge_arm_sec),
+            "edge_hold_sec": float(release_edge_hold_sec),
+            "completed": True,
+        },
     }
 
 
@@ -1072,15 +1000,10 @@ def climb(
         target_yaw_deg=des_deg1,
     )
 
-    forward_channels = tools.compose_channels(
-        lateral_cmd=0,
-        forward_cmd=int(pre_climb_forward_cmd),
-        rotation_cmd=0,
-    )
     pre_climb_drive_result = move_lib.drive_with_channels_for_duration(
         sender=sender,
-        channels=forward_channels,
         duration_sec=pre_climb_duration_sec,
+        forward_cmd=int(pre_climb_forward_cmd),
         target_yaw_deg=des_deg1,
     )
 

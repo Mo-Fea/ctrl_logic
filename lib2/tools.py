@@ -538,12 +538,85 @@ class frame_thread:
             int(self.ch9),
         ]
 
-    def set_channels(self, channels):
-        if len(channels) != CHANNEL_COUNT:
-            raise ValueError(f"channels length must be {CHANNEL_COUNT}")
+    def _reset_channels_locked(self):
+        self.ch0 = 0
+        self.ch1 = 0
+        self.ch2 = 0
+        self.ch3 = 0
+        self.ch4 = SAFE_SWITCH_VALUE
+        self.ch5 = SAFE_SWITCH_VALUE
+        self.ch6 = SAFE_SWITCH_VALUE
+        self.ch7 = SAFE_SWITCH_VALUE
+        self.ch8 = SAFE_SWITCH_VALUE
+        self.ch9 = SAFE_SWITCH_VALUE
+
+    def _set_channel_locked(self, index, value):
+        index = int(index)
+        if index < 0 or index >= CHANNEL_COUNT:
+            raise ValueError(f"channel index must be 0..{CHANNEL_COUNT - 1}, got {index}")
+        setattr(self, f"ch{index}", int(value))
+
+    def set_channel(self, index, value):
+        """
+        设置单个通道值。
+
+        frame_thread 内部维护 ch0~ch9，发送线程会在 _snapshot() 中把这些
+        内部变量统一构建成完整通道列表。
+        """
+        index = int(index)
+        if index < 0 or index >= CHANNEL_COUNT:
+            raise ValueError(f"channel index must be 0..{CHANNEL_COUNT - 1}, got {index}")
         with self._lock:
-            for index, value in enumerate(channels):
-                setattr(self, f"ch{index}", int(value))
+            self._set_channel_locked(index, value)
+
+    def set_channel_values(self, channel_values, yaw_i16=None, des_yaw_i16=None, reset_channels=False):
+        """
+        原子设置一个或多个内部通道变量。
+
+        channel_values 只描述需要修改的通道，例如 {0: lateral, 2: forward}。
+        reset_channels=True 时先恢复 ch0~ch3=0、ch4~ch9=SAFE_SWITCH_VALUE。
+        """
+        with self._lock:
+            if reset_channels:
+                self._reset_channels_locked()
+            for index, value in dict(channel_values).items():
+                self._set_channel_locked(index, value)
+            if yaw_i16 is not None:
+                self.yaw_i16 = int(yaw_i16)
+            if des_yaw_i16 is not None:
+                self.des_yaw_i16 = int(des_yaw_i16)
+                self._des_yaw_set_by_user = True
+            return self._channels_snapshot()
+
+    def set_ch0(self, value):
+        self.set_channel(0, value)
+
+    def set_ch1(self, value):
+        self.set_channel(1, value)
+
+    def set_ch2(self, value):
+        self.set_channel(2, value)
+
+    def set_ch3(self, value):
+        self.set_channel(3, value)
+
+    def set_ch4(self, value):
+        self.set_channel(4, value)
+
+    def set_ch5(self, value):
+        self.set_channel(5, value)
+
+    def set_ch6(self, value):
+        self.set_channel(6, value)
+
+    def set_ch7(self, value):
+        self.set_channel(7, value)
+
+    def set_ch8(self, value):
+        self.set_channel(8, value)
+
+    def set_ch9(self, value):
+        self.set_channel(9, value)
 
     def set_current_yaw_i16(self, yaw_i16):
         with self._lock:
@@ -554,34 +627,9 @@ class frame_thread:
             self.des_yaw_i16 = int(des_yaw_i16)
             self._des_yaw_set_by_user = True
 
-    def set_channels_and_des_yaw_i16(self, channels, des_yaw_i16):
-        self.set_channels(channels)
-        self.set_des_yaw_i16(des_yaw_i16)
-
-    def set_frame_state(self, channels, yaw_i16=None, des_yaw_i16=None):
-        if len(channels) != CHANNEL_COUNT:
-            raise ValueError(f"channels length must be {CHANNEL_COUNT}")
+    def set_safe_stop(self, yaw_i16=0, des_yaw_i16=0):
         with self._lock:
-            for index, value in enumerate(channels):
-                setattr(self, f"ch{index}", int(value))
-            if yaw_i16 is not None:
-                self.yaw_i16 = int(yaw_i16)
-            if des_yaw_i16 is not None:
-                self.des_yaw_i16 = int(des_yaw_i16)
-                self._des_yaw_set_by_user = True
-
-    def set_all_zero(self, yaw_i16=0, des_yaw_i16=0):
-        with self._lock:
-            self.ch0 = 0
-            self.ch1 = 0
-            self.ch2 = 0
-            self.ch3 = 0
-            self.ch4 = SAFE_SWITCH_VALUE
-            self.ch5 = SAFE_SWITCH_VALUE
-            self.ch6 = SAFE_SWITCH_VALUE
-            self.ch7 = SAFE_SWITCH_VALUE
-            self.ch8 = SAFE_SWITCH_VALUE
-            self.ch9 = SAFE_SWITCH_VALUE
+            self._reset_channels_locked()
             self.yaw_i16 = int(yaw_i16)
             self.des_yaw_i16 = int(des_yaw_i16)
             self._des_yaw_set_by_user = True

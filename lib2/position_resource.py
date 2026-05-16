@@ -60,7 +60,7 @@ def build_stair_height_relation_matrix():
     side = get_stair_side_length()
 
     return [
-        [-1, 1, 0, 0, pre_entrance_x, pre_entrance_y],
+        [-1, 1, 0, 0, entrance_x - side, entrance_y],
         [1, 2, 0, 2, entrance_x, entrance_y + side],
         [2, 1, 1, 1, entrance_x, entrance_y],
         [3, 1, 2, 0, entrance_x, entrance_y - side],

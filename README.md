@@ -1,3 +1,6 @@
+注意：主要阅读lib2内文件以及utils内文件，其他文件，除非用户指定文件，即便在本文件内有提及或讲解，也不需要阅读或纳入思考。
+
+
 # ws_r2 当前工程进度
 
 本目录是 R2_H 上位机控制工程。当前主线使用 `lib2/`，旧 `lib/` 基本只作参考。`R2_H-main/` 是下位机 STM32/W5500 工程，已阅读并把当前通信协议总结在本文中，后续窗口优先看本文即可，不需要重新通读单片机工程。
@@ -19,7 +22,15 @@
 主要入口：
 
 - `level_2.py`：mid360 移动到点测试，目标 `(2.0, -2.0)`，到点后不最终旋转。
-- `catch.py`：抓取 weapon 流程，当前代码里 `WEAPON_ID = 1`。
+- `catch.py`：当前是 odin KFS 抓取调试脚本；先按 vector PID waypoint 跑一圈，再移动到 `-1`，最后执行 `-1 -> 2` 高位 KFS 抓取。
+- `move_test.py`：实验性 vector PID 到点测试，固定目标航向，用距离 PID 算速度标量，再按目标向量实时分配 `ch0/ch2`；当前按 waypoint 顺序跑 `(-0.8, -4.8) -> (-1.0, 0.0) -> (-2.4, -2.4)`。
+- `move_t.py`：主线 `module.move_to_des()` 单点移动测试，目标 `(-0.8, -4.8)`，持续打印通道、yaw、当前位置、目标距离和 odom。
+- `rotation_move.py`：带输入保持点的旋转位置保持测试，保持点 `(-0.8, -4.8)`，目标 yaw `180deg`，持续打印通道、yaw、位置误差和 odom。
+- `ori_rot.py`：原地循环旋转测试，循环 `0.01 -> 90 -> 180 -> -90 -> 0.01`，使用当前坐标作为保持点并持续打印通道状态。
+- `fwd.py`：直连下位机简单前进测试，按新 `frame_thread + move.set_motion_channels()` 接口持续发送 `ch2`。
+- `up_down_test.py`：odin 上下台阶测试；当前最后一段已从下楼梯替换为 `1 -> 2` 的 KFS 抓取。
+- `suck.py`：直连下位机 KFS 高位吸取/存储调试脚本，不等待定位，用于单独观察 KFS 通道时序。
+- `rigion_1.py`：区域 1 任务测试脚本；抓取 1 号 weapon，移动到 `-1`，再执行 `-1 -> 2`、`2 -> 1`、`1 -> 4` 上下楼。
 - `level_move.py`：用 `ch0` 横移到点的测试入口。
 - `rotation.py`：单独测试目标航向发送。
 
@@ -28,7 +39,10 @@
 - 优先复用已有封装：`module.init()`、`module.start_position_thread()`、`module.start_odometry_thread()`、`move.move_to_target()`、`move.move_backward_to_target()`、`move.rotate_to_target_yaw_segmented()`、`move.control_kfs_pose()`、`module.adjust_position()`、`module.fetch_and_store_kfs()`、`tools.compose_channels()`。
 - 不要绕过 `frame_thread` 直接 `sock.sendall()`；动作只通过 `sender.set_*()` 更新发送总线。
 - 不要重复写 TCP 协议、位姿计算、旋转闭环；新增动作尽量放在 `module.py` 组合已有底层动作，底层定时通道时序放在 `move.py`。
-- `tools.compose_channels()` 默认开关通道是安全值 `1`，动作需要模式/边沿时显式覆盖 `ch4/ch5/ch6/ch7...`。
+- 除非明确要求，不要修改 `test/` 下的测试用例文件或旧测试脚本；这些文件可能保留旧接口/旧协议用于对照，主线修改优先落在 `lib2/`、当前调试入口和 README。
+- 当前通道构建逻辑已改为 `frame_thread` 内部维护 `ch0~ch9/yaw_i16/des_yaw_i16`，后台发送线程每帧读取内部变量并构建完整 frame；主线动作不再外部构造完整 `channels` 后整体覆盖。
+- 主线应优先使用 `sender.set_channel_values(...)` 或 `move.set_channel_values(...)` 只修改本动作负责的通道；移动/旋转类可用 `move.set_motion_channels(...)` 修改 `ch0/ch2/ch3/des_yaw_i16`。不要恢复旧的 `set_channels_and_des_yaw_i16(...)` 整帧覆盖方式。
+- 现在没有自动安全复位；动作结束后哪些通道需要复位必须由动作边界显式管理。当前任务就是通道构建逻辑修改后的动作逻辑勘误，重点检查各组合动作完成后的最终通道状态。
 - KFS 吸取后再执行机械臂姿态时，必须保持 `ch4=3`，否则会产生 `3->1` 下降沿导致释放；当前通过 `move.control_kfs_pose(..., suction_ch4=3)` 保持。
 - 修改通道逻辑时优先对照本文“最新通信协议”和 `R2_H-main/Core/Src/freertos.c` 的当前逻辑。
 - 当前工作目录未必保留 `.git` 元数据；无论是否在 git 仓库中，工作中都要谨慎对待已有文件改动，不要回退无关内容。
@@ -186,6 +200,34 @@ ch5=2, ch4: 1 -> 3
 ch5=2, ch4: 3 -> 1
 ```
 
+### 上位机通道状态管理
+
+当前上位机发送线程 `tools.frame_thread` 内部维护：
+
+```text
+ch0..ch9
+yaw_i16
+des_yaw_i16
+```
+
+后台 `_run()` 每一帧调用 `_snapshot()`，从内部变量生成 `channels`，再由 `build_frame()` 打包发送。动作层不应再构造完整 `channels` 列表整体覆盖发送状态。
+
+当前推荐接口：
+
+```python
+sender.set_channel_values({4: 3, 5: 2})
+move.set_channel_values(sender, channel_values={4: 3, 5: 2})
+move.set_motion_channels(sender, lateral_cmd=0, forward_cmd=300, rotation_cmd=0, des_yaw_i16=...)
+```
+
+语义：
+
+- `set_channel_values(...)`：只修改传入的通道，不复位其他通道；可选同步修改 `yaw_i16/des_yaw_i16`。
+- `set_motion_channels(...)`：只修改 `ch0/ch2/ch3/des_yaw_i16`；不会复位其他通道，也不再叠加写非移动通道。
+- `sender.set_safe_stop(...)`：会恢复安全默认通道，但主线不会自动调用；只有在明确需要全局复位时再用。
+
+因此，当前每个动作必须自己管理结束状态。例如 KFS、weapon、升降模式完成后，如果后续不继续使用对应模式，需要另写复位动作。
+
 ### KFS 方块/吸盘机械臂协议
 
 KFS 方块吸取拆成两块动作：
@@ -337,35 +379,129 @@ mid360 当前逻辑：
 
 ## 移动逻辑
 
+当前 `lib2/move.py` / `lib2/module.py` 主线移动已经切到“当前 yaw 位置保持式移动”。移动和旋转共用 `move._calculate_position_hold_motion()`：持续下发目标 yaw，同时用当前位置到目标点/保持点的误差计算 `ch0/ch2`，不再使用固定航向 vector PID 的 yaw gate。
+
 `module.move_to_des(...)` 是主组合移动：
 
-- 先按当前参考点算初始目标方向。
-- 分段旋转到初始目标方向。
+- 等待当前 `reference` 参考点位姿可用。
 - 调用 `move.move_to_target(...)` 阻塞移动到目标点。
 - `reference="robot"`：机器人中心到点。
 - `reference="weapon"`：weapon/夹爪到点，底盘 yaw 仍用 robot yaw。
-- `target_deg=None`：到点后发送 `des_yaw_i16=0`，停止旋转控制，不执行最终旋转。
-- `target_deg` 是角度值：到点后再分段旋转到该最终角。
+- `target_deg` 现在是移动过程持续下发的目标航向角，不再是“到点后才旋转”的角度。
+- `target_deg=None`：进入函数时取当前 yaw 作为移动过程目标航向；到点后发送 `des_yaw_i16=0`，停止航向控制。
+- `target_deg` 是角度值：移动过程持续输出该目标航向；到点后用 `wait_until_direction_reached()` 等待当前 yaw 稳定在该角度附近。
 
-`move.move_to_target(...)` 是连续闭环移动，不是分段式位移。每一轮都会按当前参考点重新计算目标航向角，然后根据距离换速度档：
-
-```text
-远距离: cruise_forward_cmd
-近点区: near_forward_cmd
-临点区: fine_forward_cmd
-```
-
-默认近点/临点参数在 `move.py`：
+`move.move_to_target(...)` 是位置保持式阻塞移动，不是分段式位移。每一轮逻辑：
 
 ```text
-near_target_distance = 0.5m
-near_forward_cmd = 150
-fine_target_distance = 0.4m
-fine_forward_cmd = 75
-stop_distance = 0.02m
+1. 读取 robot pose、reference pose 和 odom。
+2. 用 reference pose 到目标点的平面距离按比例输出 scalar_cmd，默认复用 `DEFAULT_ROTATE_POSITION_KP`，也可通过 `position_hold_kp` 覆盖。
+3. 将 map/world 下的 dx/dy 按当前 robot yaw 转成车体 forward/lateral 误差。
+4. 按误差向量比例分配到 ch0/ch2。
+5. 不再因为 yaw_error 超过 move_gate_deg 而停 ch0/ch2；底盘 yaw PID 只由 des_yaw_i16 影响。
+6. 到点后停车；final_target_yaw_deg=None 时 des_yaw_i16=0，否则保持目标航向。
 ```
 
-如果要提高 weapon/KFS 夹取精度，不建议改全局默认值；应在对应组合动作调用 `move_to_target()` 时传专用保守参数，例如更早进入近点区、降低 `fine_forward_cmd`、收紧 `move_gate_deg` 和到点速度阈值。
+旋转逻辑 `move.rotate_to_target_yaw_segmented(...)` 也调用同一个 `_calculate_position_hold_motion()`。区别是旋转没有业务目标点输入时，会在进入函数时读取当前 robot 坐标作为保持点；传入 `des_x/des_y` 时则把输入点作为保持点。
+
+位置保持/移动向量分解现在会先预测 yaw：
+
+```text
+predicted_yaw_deg = current_yaw_deg + degrees(angular_z_rad * prediction_dt)
+prediction_dt = clamp(yaw_age_sec + 1/70, 0, 0.10)
+```
+
+`angular_z_rad` 来自 odom 的 `twist.angular.z`，是有符号角速度；正负方向需要现场通过日志确认是否与 `current_yaw_deg` 增减一致。`move_to_target()` 会读取 `odom_runtime` 使用完整预测；`rotate_to_target_yaw_segmented(..., odom_runtime=...)` 传入 odom 后也会使用角速度，否则退化为只补偿 yaw 数据年龄和 1/70s 发送周期。
+
+当前默认关键参数在 `move.py`：
+
+```text
+DEFAULT_ROTATE_POSITION_KP = 900.0
+DEFAULT_ROTATE_POSITION_MAX_CMD = 600  # 旋转保持默认；移动默认用 cruise_forward_cmd/v 作为上限，也可传 position_hold_max_cmd
+DEFAULT_LATERAL_CMD_SIGN = -1
+DEFAULT_FORWARD_CMD_SIGN = 1
+DEFAULT_STOP_DISTANCE = 0.02m
+```
+
+`move.move_backward_to_target(...)` 现在不再维护独立倒退闭环，而是把移动过程目标航向设置为输入最终角 `+180deg` 后复用 `move_to_target()`；到点后再把目标航向字段切回原始最终角。
+
+`move.move_to_target(...)` 现在只写移动相关通道 `ch0/ch2/ch3/des_yaw_i16`，不会复位 `ch1/ch4/ch5` 等模式/夹持通道。抓取 weapon 后，只要没有其他动作显式改这些通道，普通移动会自然保持当前夹持状态。带 weapon 上下楼前仍必须重新确认夹持通道是否需要贯穿保持，因为 `module.climb()` / `module.descend()` 会切换升降模式。
+
+### 旋转逻辑
+
+`move.rotate_to_target_yaw_segmented(...)` 现在是“目标航向 + 位置保持”的阻塞旋转：
+
+```text
+1. 如果 des_x/des_y 都为 0，进入函数时读取一次当前机器人坐标作为保持点。
+2. 如果 des_x/des_y 非 0，使用输入坐标作为保持点。
+3. 每轮持续发送目标 yaw，同时用当前位置到保持点的误差计算 ch0/ch2 做位置保持。
+4. 不再因为 yaw 误差大而停 ch0/ch2；底盘 yaw PID 只由 des_yaw_i16 影响。
+5. 退出条件：yaw 到目标角阈值内，且当前位置距离保持点不超过 position_tolerance。
+```
+
+当前默认关键参数：
+
+```text
+DEFAULT_SEGMENTED_YAW_STEP_DEG = None
+DEFAULT_SEGMENTED_YAW_STEP_DEG_CURRENT_POSITION = 10.0   # des_x/des_y 都为 0
+DEFAULT_SEGMENTED_YAW_STEP_DEG_INPUT_POSITION = 360.0    # 使用输入保持点
+DEFAULT_ROTATE_POSITION_TOLERANCE = 0.05m
+DEFAULT_ROTATE_POSITION_MAX_CMD = 600
+DEFAULT_ROTATE_POSITION_KP = 900.0
+DEFAULT_DIRECTION_STABLE_SEC = 1.0
+```
+
+测试脚本里可局部覆盖这些参数，例如 `rotation_move.py` 目前对本次调用传 `stable_sec=0.0`，用于取消目标附近额外等待。注意协议里 `target_yaw_deg=0.0` 仍表示 `des_yaw_i16=0` 关闭航向 PID；如果要转到 0 度，应继续用 `0.01deg`。
+
+### 旧 vector PID 到点来源
+
+```text
+1. 固定车体目标航向 FIXED_YAW_DEG，当前为 0.01deg。
+2. 从当前 position 后端读取机器人中心 map/world 坐标。
+3. 用目标点距离做 PID，输出速度标量 scalar_cmd。
+4. 将 map/world 下的目标误差向量转换到固定航向对应的车体前进/横移轴。
+5. 按实时向量比例分配到 ch0 横移和 ch2 前进。
+6. 若航向误差超过 YAW_GATE_DEG，停车等待下位机 yaw PID 转回阈值内。
+7. 到点后停车并进入下一个 waypoint。
+```
+
+这一节现在只作为旧测试脚本 `move_test.py` 的来源记录；主线 `move.move_to_target(...)` 已改为当前 yaw 位置保持式移动。`move_test.py` 保留为测试脚本，当前测试参数：
+
+```text
+TARGET_POINTS = [(-0.8, -4.8), (-1.0, 0.0), (-2.4, -2.4)]
+FIXED_YAW_DEG = 0.01
+YAW_GATE_DEG = 2.0
+MIN_ACTIVE_MOVE_CMD = 180
+LATERAL_CMD_SIGN = -1
+FORWARD_CMD_SIGN = 1
+MOVE_TIMEOUT_SEC = 600.0
+```
+
+实测过程中发现 `ch0` 符号与最初假设相反，已通过 `LATERAL_CMD_SIGN=-1` 翻转；如果后续在 weapon reference 下发现距离持续变大，应优先检查 `FORWARD_CMD_SIGN`、当前 yaw 下的坐标变换、外参、以及调试距离是否使用了正确参考点。
+
+重构时必须重点检查受影响入口：
+
+```text
+module.move_to_des()
+module.move_backward_to_des()
+module.adjust_position()
+module.fetch_and_store_kfs()
+module.fetch_weapon()
+module.climb()
+module.descend()
+module.execute_action_row()
+```
+
+已知风险：
+
+```text
+1. 新主线已取消 yaw gate 停车逻辑；如果 yaw 误差大时平移方向异常，应优先看当前 yaw、目标 yaw 和车体坐标变换。
+2. 位置保持式比例输出没有最小通道值；如果临近目标推不动车，应优先调 `DEFAULT_ROTATE_POSITION_KP` 或本次 `cruise_forward_cmd` 上限。
+3. ch0/ch2 符号必须沿用实测值：LATERAL_CMD_SIGN=-1，FORWARD_CMD_SIGN=1。
+4. 旧 overshoot 回退逻辑与当前位置保持式移动不兼容，当前主线未继续使用旧过点回退。
+5. weapon reference 会直接受新逻辑影响，必须单独实机验证。
+6. 上下楼触发前后仍需要明确方向和姿态，不应把台阶触发定时动作一起重写。
+```
 
 ## 台阶矩阵与编号工具
 
@@ -418,11 +554,11 @@ module.adjust_position(
     direction=1,      # 1=x+, 2=y+, 3=y-, 4=x-
     stair_id=2,
     height_relation=2, # 1=微调方向台阶较高，2=微调方向台阶较低
-    adjust_distance=...
+    adjust_distance=...  # 默认 PRE_DESCEND_ADJUST_DISTANCE = 0.3m
 )
 ```
 
-函数内部会按 `stair_id` 查矩阵坐标。`height_relation=2` 时执行原来的坐标微调逻辑，按方向和 `adjust_distance` 计算微调目标；`height_relation=1` 时先按 `direction` 旋转到目标航向，再用 `ch2=200` 前进 `2s`，完成微调。`height_relation` 不是 `1/2` 会报错并终止程序。
+函数内部会按 `stair_id` 查矩阵坐标。`height_relation=2` 时执行原来的坐标微调逻辑，按方向和 `adjust_distance` 计算微调目标；`height_relation=1` 时先按 `direction` 旋转到目标航向，再用 `ch2=200` 前进 `2s`，完成微调。`height_relation` 不是 `1/2` 会报错并终止程序。当前默认微调距离 `PRE_DESCEND_ADJUST_DISTANCE = 0.3m`。
 
 ## KFS 吸取并存储流程
 
@@ -453,6 +589,7 @@ direction  吸取动作方向，1=前方, 2=+90deg/左, 3=-90deg/右, 4=后方
 9. 调用 `module.set_kfs_suction(..., suction_on=False)`，发送 `ch4:3->1` 释放。
 10. 调用 `move.control_kfs_pose(..., pose_id=0, suction_ch4=1)` 回 0 态。
 11. 调用 `module.move_backward_to_des(..., x/y=当前 stair_id 中心坐标, target_deg=0.0)` 倒退回当前台阶中心。
+12. 显式复位 KFS 相关通道：`ch4=1,ch5=1,ch6=1,ch7=1`。
 
 相关底层函数：
 
@@ -460,7 +597,36 @@ direction  吸取动作方向，1=前方, 2=+90deg/左, 3=-90deg/右, 4=后方
 - `module.set_kfs_suction(sender, suction_on=True/False, ...)`
 - `module.wait_with_kfs_suction(sender, duration_sec, ...)`
 
-当前 `fetch_and_store_kfs()` 已做过语法检查和 monkey-patch dry run，但还没有现场实机验证。
+`fetch_and_store_kfs()` 当前还支持测试用等待参数：
+
+```python
+module.fetch_and_store_kfs(
+    ...,
+    suction_hold_sec=...,
+    grab_pose_hold_sec=...,
+    transition_pose_hold_sec=...,
+    store_pose_hold_sec=...,
+)
+```
+
+未传时继续使用默认等待；`catch.py` 可按现场调试覆盖。当前高/低位抓取在机械臂和吸盘时序上是对称的：区别只在 `pose_id=1/2`；但完整流程不完全对称，因为 `adjust_position()` 中 `height_relation=1` 走“转向后定时 ch2=200 前进 2s”，`height_relation=2` 走坐标微调。
+
+当前 `fetch_and_store_kfs()` 已做过语法检查和部分现场调试，但完整自动抓取并存储流程仍需继续实机验证。
+
+当前结束状态需要特别注意：流程末尾会执行吸盘释放、`pose_id=0` 回 0 态，然后再移动回当前台阶中心；随后显式复位 KFS 相关通道。因此成功结束后通常保留：
+
+```text
+ch0=0
+ch2=0
+ch3=0
+ch4=1
+ch5=1
+ch6=1
+ch7=1
+des_yaw_i16=final_target_yaw_deg 对应值
+```
+
+也就是说，吸盘已释放、机械臂已回 0 态，并且已经退出 KFS 模式。
 
 ## Weapon 抓取流程
 
@@ -491,7 +657,7 @@ direction  吸取动作方向，1=前方, 2=+90deg/左, 3=-90deg/右, 4=后方
 
 当前流程：
 
-1. 以 `reference="weapon"` 移动 weapon/夹爪到目标点。
+1. 以 `reference="weapon"` 移动 weapon/夹爪到目标点，固定航向默认 `90deg`。
 2. 进入武器模式并夹紧抬起：
    ```text
    ch5=3, ch4=1, ch1=0     保持 0.3s
@@ -499,13 +665,34 @@ direction  吸取动作方向，1=前方, 2=+90deg/左, 3=-90deg/右, 4=后方
    ch5=3, ch4=3, ch1=0     保持 1.0s
    ch5=3, ch4=3, ch1=100   保持 1.0s
    ```
-3. 阻塞旋转到 `90°`。
-4. 保持 `ch5=3,ch4=3,ch1=100`，用 `ch2=-100` 后退。
-5. 当前已改为当 `weapon_pose["y"] < 当前后端 WEAPON_RETREAT_STOP_Y` 时停止后退，不再用机器人中心 `robot_pose["y"]`。
-6. 再阻塞旋转到 `-90°`。
-7. 完成后仍保持 `ch5=3,ch4=3,ch1=100`，方便后续用 `ch4: 3 -> 1` 放开。
+3. 保持 `ch5=3,ch4=3,ch1=100`，以 `90deg` 固定航向、`reference="robot"` 正向移动到中间点 `(-2.4, -1.2)`。
+4. 保持 `ch5=3,ch4=3,ch1=100`，以 `-90deg` 固定航向、`reference="robot"` 正向移动到最终点 `(-2.4, -2.4)`。
+5. 到最终点后保持夹持等待 `5s`。
+6. 当前不在 `fetch_weapon()` 内释放 weapon，最后继续保持夹持：
+   ```text
+   ch5=3, ch4=3, ch1=100, ch2=0
+   ```
 
-注意：`catch.py` 当前在 `fetch_weapon()` 后还会再调用一次 `move.rotate_to_target_yaw_segmented(..., target_yaw_deg=-90.0)`，而 `fetch_weapon()` 内部已经包含最终旋转到 `-90°`，这可能是重复逻辑，后续可按现场效果删除。
+注意：`fetch_weapon()` 第一段移动用 `reference="weapon"`，但多数旧 debug 打印只看机器人中心到某个目标点的距离。调试 weapon 抓取时必须打印 `position_runtime.get_weapon_pose()` 到对应 `WEAPON_TARGETS[weapon_id]` 的距离，否则会把机器人中心到 `-1` 或其他点的距离误认为 weapon 到点误差。
+
+当前最终状态：
+
+```text
+ch1=100
+ch2=0
+ch4=3
+ch5=3
+```
+
+也就是保持 weapon 模式、保持抬升、保持夹紧。后续释放/放下/退出 weapon 模式由单独复位方法处理。
+
+`move.reset_weapon_after_fetch(sender)` 已封装 weapon 释放/退出动作：
+
+```text
+1. ch4=1 释放 weapon 气缸。
+2. 等待 3s。
+3. ch1=0,ch5=1，停止抬升并退出 weapon 模式。
+```
 
 ## 动作矩阵与 KFS 路线
 
@@ -680,17 +867,40 @@ grab_action         1=抓取，0=不抓取；当前矩阵生成层只输出 0/1
 - 已运行 `python3 -m py_compile lib2/module.py`。
 - 已运行 `python3 -m py_compile lib2/position_resource.py lib2/module.py lib2/tools.py lib2/move.py`。
 - 已运行 `python3 -m py_compile utils/utils.py`。
+- 已运行 `python3 -m py_compile catch.py`，当前 `catch.py` 是 odin `1 -> 2` KFS 抓取调试脚本。
+- 已运行 `python3 -m py_compile up_down_test.py`，最后一段已替换为 `1 -> 2` KFS 抓取。
+- 已运行 `python3 -m py_compile move_test.py`，当前旧 vector PID waypoint 测试可语法通过；主移动链路已改为当前 yaw 位置保持式移动。
+- 已运行 `python3 -m py_compile move_t.py rotation_move.py ori_rot.py fwd.py`，当前移动/旋转/前进调试脚本均可语法通过。
+- 已运行 `python3 -m py_compile ori_rot.py lib2/move.py`，确认循环旋转测试和动态旋转分段默认可语法通过。
 - 已做资源层 smoke test：`module.get_stair_xy(2)` 与 `position_resource.get_stair_xy(2)` 一致，且 `module.position_lib is position_resource.position_lib` 为 `True`。
 - 已用 `build_action_matrix_from_qr("000020020200")` 做过一次无 GUI 生成检查，确认 `height_action` 和 `grab_action` 都只输出 `0/1`。
 - `execute_action_row()` 的真实硬件动作分支尚未实机验证。
+- `move_test.py` 的 vector PID 已通过现场日志暴露并修正了 `ch0` 横移符号问题；主线切到当前 yaw 位置保持式移动后仍需要继续实机验证 `reference="weapon"` 外参和 `ch0/ch2` 符号组合。
 
 ### 协作和实现偏好
 
+- `lib2` 移动到点逻辑已经切到当前 yaw 位置保持式移动；后续窗口不要再把 `move_test.py` 当成主线实现来源，而应优先检查 `lib2/move.py` / `lib2/module.py` 主线行为。
+- 当前优先任务是通道构建逻辑修改后的动作勘误：确认每个动作只写自己负责的通道，并逐个确认动作完成后的最终通道状态和复位边界。
 - 用户希望尽量复用已有封装，尤其是 `module.py` 组合动作、`move.py` 底层动作、`tools.py` 方向/矩阵工具；不要重复实现已有逻辑。
 - 发现规划语义、动作矩阵、真实场地假设之间可能矛盾时，要明确指出并质问确认，不要为了继续写代码而默认绕过。
 - 对硬件动作相关逻辑要保守，宁可加防御检查并退出，也不要静默跳过可能危险的动作。
 - 讨论方向时，外部接口优先使用方向 int：`1=前方/x+`、`2=+90/左/y+`、`3=-90/右/y-`、`4=后方/x-`；角度转换应尽量留在已有封装内部。
 - README 是下一窗口的交接入口；当前进度、关键假设、未完成分支和实机风险要及时写进 README。
+
+### 本轮修改错误记录
+
+本轮围绕 vector PID、KFS、weapon 和 `rigion_1.py` 做了多次现场调试，以下错误需要后续明确避免：
+
+- 最初把 `module.move_to_des()` / `move_backward_to_des()` 的输入误判为需要改签名；实际只需要改变内部语义，把原有 `target_deg` 当作移动过程固定 yaw，外层调用签名可以保持不变。
+- 在 `fetch_weapon()` 调试时，用 `tools.debug_print(sender, position_runtime, entry_x, entry_y)` 打印的是机器人中心到 `-1` 台阶的距离，不是 weapon/夹爪到 weapon 目标点的距离。这个日志不能判断 `fetch_weapon(reference="weapon")` 是否接近目标。
+- 让 `fetch_weapon()` 第一段使用固定 `90deg` 后，现场出现距离变大时，不能只看 robot debug；必须打印 `position_runtime.get_weapon_pose()` 到 `WEAPON_TARGETS[weapon_id]` 的 `dx/dy/distance`，再判断是 `ch0/ch2` 符号、固定航向、外参还是目标点错误。
+- 曾把“夹取后先到第二个点，再到 `-2.4,-2.4`”误实现为“先到 `x=-1.2,y=-2.4`”或“先到 `x=-1.2,y保持当前`”，并且一度改成单段到最终点。当前要求已修正为两段正向移动：`90deg -> (-2.4,-1.2)`，`-90deg -> (-2.4,-2.4)`。
+- 抓取后普通移动现在不会覆盖 `ch1/ch4/ch5`，因为 `move.move_to_target()` 只写 `ch0/ch2/ch3/des_yaw_i16`。但上下楼组合动作仍会切换 `ch5=1`，带 weapon 上下楼前必须单独设计夹持保持策略。
+- 通道构建逻辑从“外部构造完整 channels 并整体覆盖”改为“只设置内部通道变量，后台线程统一构帧”后，不能再依赖隐式安全默认值。每个动作完成后都会保留最后写入的模式/触发通道，必须显式确认是否需要复位。
+- `fetch_weapon()` 最新流程在 `(-2.4,-2.4)` 等待 `5s` 后不再释放 weapon，最后保持 `ch1=100,ch4=3,ch5=3`；后续释放/放下/退出 weapon 模式由单独复位方法处理。
+- `fetch_and_store_kfs()` 最新流程会释放吸盘、回 0 态、倒退回中心，并最终显式复位为 `ch4=1,ch5=1,ch6=1,ch7=1`；后续若仍要继续 KFS，需要重新进入 `ch5=2`。
+- `suck.py` 直连测试中，若下位机显示 `ch4` 只保持一次或一小段时间，必须区分“原始网口帧 ch4”与“下位机业务层内部映射/边沿状态”。上位机侧可通过打印实际发送帧确认，但不要把下位机内部恢复为 `1` 误判为上位机没有发 `3`。
+- `DEFAULT_MOVE_GATE_DEG=2.0` 对固定 `90deg` 移动偏紧，现场日志中多次出现 `yaw_error` 稳定在 `2.x~4.xdeg` 导致 `ch0/ch2=0`。如果主要验证平移方向和 PID，先临时放宽门控比继续调 PID 更有效。
 
 ### README 更新要求
 
@@ -712,5 +922,10 @@ grab_action         1=抓取，0=不抓取；当前矩阵生成层只输出 0/1
 - 旧 `level_1.py` 和 `lib/` 仍可能依赖旧 odin 逻辑，不是当前主流程。
 - 如果 pose 或 odometry 出现 `NaN/inf`，`move.py` 已加有限值保护，会停车跳过该轮，避免把非法 yaw 发给下位机。
 - 当前 TCP 连接和首帧发送都不能证明下位机业务层已经执行，仍需现场观察或后续加 ACK。
-- 移动到点能较准，但最终旋转可能带来位置漂移；现在 `level_2.py` 默认到点后不最终旋转。
+- 移动到点能较准；旋转逻辑已加入位置保持，但是否能抑制麦克纳姆轮机械误差仍需实机继续验证。`level_2.py` 默认到点后不最终旋转。
 - KFS 新协议的关键点是 `ch5=2,ch6=1/2,ch7:1->3` 触发高/低位抓取，完成后依次触发 `ch6=3` 过渡态、`ch6=4` 存储姿态；`ch7=0` 回归 0 态；`ch5=2,ch4:1->3` 吸取，`ch5=2,ch4:3->1` 释放。
+- `catch.py` 现在会持续打印 `frame_thread` 当前通道、yaw、目标 yaw 和发送状态；调试 KFS 时可以直接看 `ch5=2,ch6=pose_id,ch7=1->3` 是否按预期发出。
+- `1 -> 2` 当前矩阵推导为 `direction=3`、`height_relation=2`、`pose_id=2`，是低位抓取；`-1 -> 2` 当前为 `direction=1`、`height_relation=1`、`pose_id=1`，是高位抓取。
+- `move.py` 主移动逻辑已取消 yaw gate 停车；`move_test.py` 仍保留旧 yaw gate 测试逻辑，调试旧脚本时仍需注意门控过紧会让 `ch0/ch2` 长时间为 0。
+- `move.py` 主移动逻辑已取消旧 PID 标量和 `MIN_ACTIVE_MOVE_CMD`；当前位置保持式移动临近目标推不动车时，优先调 `DEFAULT_ROTATE_POSITION_KP` 或本次速度上限。
+- `rotate_to_target_yaw_segmented()` 未传保持点时用当前位置保持且默认 `10deg` 分段；传入 `des_x/des_y` 时用输入点保持且默认 `360deg` 分段。`target_yaw_deg=0.0` 仍是关闭航向 PID，不是转到 0 度。

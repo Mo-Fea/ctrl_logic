@@ -10,7 +10,13 @@ from lib2 import module, tools
 LIDAR_TYPE = 1
 ODOM_TOPIC = "/odin1/odometry_highfreq"
 
-START_STAIR_ID = 1
+PRE_GRAB_WAYPOINTS = [
+    (-0.8, -4.8),
+    (-1.0, 0.0),
+    (-2.4, -2.4),
+]
+PRE_GRAB_STAIR_ID = -1
+START_STAIR_ID = -1
 TARGET_STAIR_ID = 2
 MOVE_SPEED = 600
 FINAL_DIRECTION = 1
@@ -120,10 +126,54 @@ def main():
             print("Catch task failed: runtime data not ready.")
             return
 
+        pre_grab_yaw_deg = tools.direction_int_to_yaw_deg(FINAL_DIRECTION)
+        waypoint_results = []
+        for index, (target_x, target_y) in enumerate(PRE_GRAB_WAYPOINTS, start=1):
+            print(
+                f"Pre-grab waypoint {index}/{len(PRE_GRAB_WAYPOINTS)}: "
+                f"move to ({target_x:.3f}, {target_y:.3f}) "
+                f"with fixed_yaw={pre_grab_yaw_deg:.2f} deg..."
+            )
+            waypoint_result = module.move_to_des(
+                sender=sender,
+                position_runtime=position_runtime,
+                odom_runtime=odom_runtime,
+                x=target_x,
+                y=target_y,
+                target_deg=pre_grab_yaw_deg,
+                v=MOVE_SPEED,
+            )
+            if waypoint_result is None:
+                print(f"Catch task failed: waypoint {index} move failed.")
+                return
+            print(f"Pre-grab waypoint {index} finished.")
+            print(waypoint_result)
+            waypoint_results.append(waypoint_result)
+
+        pre_grab_x, pre_grab_y = module.get_stair_xy(PRE_GRAB_STAIR_ID)
+        print(
+            f"Moving to pre-grab stair {PRE_GRAB_STAIR_ID} "
+            f"({pre_grab_x:.3f}, {pre_grab_y:.3f}) "
+            f"with fixed_yaw={pre_grab_yaw_deg:.2f} deg..."
+        )
+        pre_grab_result = module.move_to_des(
+            sender=sender,
+            position_runtime=position_runtime,
+            odom_runtime=odom_runtime,
+            x=pre_grab_x,
+            y=pre_grab_y,
+            target_deg=pre_grab_yaw_deg,
+            v=MOVE_SPEED,
+        )
+        if pre_grab_result is None:
+            print("Catch task failed: pre-grab move failed.")
+            return
+        print("Pre-grab move finished.")
+        print(pre_grab_result)
+
         move_direction = tools.stair_id_to_direction(START_STAIR_ID, TARGET_STAIR_ID)
         print(
-            f"Robot is assumed to be on stair {START_STAIR_ID}; "
-            f"skip move_to_des and execute {START_STAIR_ID}->{TARGET_STAIR_ID} grab directly."
+            f"Execute {START_STAIR_ID}->{TARGET_STAIR_ID} grab after pre-grab move."
         )
 
         action_row = [
@@ -171,8 +221,9 @@ def main():
 
         print("Catch task finished.")
         print({
-            "move_result": None,
-            "move_skipped": True,
+            "waypoint_results": waypoint_results,
+            "pre_grab_result": pre_grab_result,
+            "move_skipped": False,
             "action_row": action_row,
             "action_result": action_result,
             "fetch_result": fetch_result,

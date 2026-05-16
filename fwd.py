@@ -2,6 +2,7 @@
 
 import time
 
+from lib2 import move
 from lib2 import tools
 
 
@@ -17,27 +18,29 @@ def main():
         print("Starting forward test...")
         sock = tools.connect()
         sender = tools.frame_thread(sock=sock, hz=SEND_HZ)
-        sender.set_channels_and_des_yaw_i16(
-            tools.compose_channels(
-                lateral_cmd=0,
-                forward_cmd=FORWARD_CMD,
-                rotation_cmd=0,
-            ),
-            0,
-        )
+        sender.set_des_yaw_i16(0)
         sender.start()
         if not sender.wait_until_first_send(timeout_sec=2.0):
             raise RuntimeError("frame_thread did not send first frame within 2s")
 
         print(f"Forward cmd ch2={FORWARD_CMD} for {DURATION_SEC:.1f}s...")
-        time.sleep(DURATION_SEC)
+        deadline = time.time() + DURATION_SEC
+        while time.time() < deadline:
+            move.set_motion_channels(
+                sender,
+                lateral_cmd=0,
+                forward_cmd=FORWARD_CMD,
+                rotation_cmd=0,
+                des_yaw_i16=0,
+            )
+            time.sleep(0.02)
 
     except KeyboardInterrupt:
         print("\nStopped by user.")
 
     finally:
         if sender is not None:
-            sender.set_all_zero()
+            move.set_motion_channels(sender, des_yaw_i16=0)
             time.sleep(0.1)
             sender.stop(send_stop=True)
             tools.socket_close(sender.sock)
