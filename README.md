@@ -17,7 +17,9 @@
 - `utils/meilin.py`：梅林 12 格路径规划，0-1 BFS，返回路径。
 - `utils/route.py`：D435i 扫二维码、调用规划、打印动作矩阵、可视化，有 OpenCV/matplotlib GUI。
 - `utils/utils.py`：无 GUI 的纯工具，已实现 `build_action_matrix_from_qr()` / `build_action_matrix_from_kfs()`，用于生成 `n*5` 动作矩阵。
-- `utils/route1.py` / `utils/race.py`：新版比赛规则路径规划入口，使用 D435i 扫二维码并生成动作矩阵；方向和高度编码与 `utils/route.py` 旧梅林版本不同，后续执行层需要明确使用哪套矩阵定义。
+- `utils/race.py`：新版挑战赛路径规划核心，维护地图、规则、`plan_path()`、`validate_path()`、可视化等。
+- `utils/challenge_lib.py`：挑战赛对外库入口，封装二维码解析、`race.py` 规划、动作矩阵生成，以及后台 QR 扫描线程 `ChallengeQRScanner`。
+- `utils/route1.py`：挑战赛扫码调试脚本；当前只调用 `challenge_lib.py`，使用 D435i 扫二维码并生成动作矩阵。方向和高度编码与 `utils/route.py` 旧梅林版本不同，后续执行层需要明确使用哪套矩阵定义。
 
 主要入口：
 
@@ -299,7 +301,7 @@ ID6 目标 total_ecd: -674021
    ch5=2, ch6=4, ch7: 1 -> 3 -> 1
 
 6. 如需回归 0 态:
-   ch5=2, ch7=0
+   ch5=2, ch6=0, ch7: 1 -> 3 -> 1
 ```
 
 上位机当前封装默认时序：
@@ -368,6 +370,17 @@ mid360 当前逻辑：
 
 后续注意：`position_odin.py` 和 `position_mid360.py` 应尽量保持同名接口/语义，避免修改 `module.py`、`move.py` 调用层。
 
+`position_resource.extract_odometry_params()` 读取 odom 速度时会保留原始 twist：
+
+```text
+raw_linear_x/raw_linear_y/raw_linear_z
+raw_angular_x/raw_angular_y/raw_angular_z
+```
+
+同时按 odom pose 的 yaw 做一次平面旋转，`linear_x/linear_y` 和 `angular_x/angular_y` 返回变换后的速度，`velocity_transform = "pose_yaw_child_to_parent"`。`angular_z` 保持原始 `twist.angular.z`，因为平面 yaw 旋转不改变 z 轴角速度。
+
+`position_resource.predict_position_xy()` / `predict_pose_xy()` 提供资源层位置预测：使用地图坐标系下的 `linear_x/linear_y` 和位姿年龄计算 `pre_x/pre_y`，默认 `prediction_dt = clamp(position_age_sec + 1/70, 0, 0.10)`。`move.move_to_target()` 当前到点判定仍使用真实 `current_x/current_y`，但 ch0/ch2 分配使用 `pre_x/pre_y`，用于补偿位姿与控制发送延迟。
+
 ## 初始化流程
 
 `module.init()` 当前是阻塞式初始化：
@@ -416,7 +429,7 @@ predicted_yaw_deg = current_yaw_deg + degrees(angular_z_rad * prediction_dt)
 prediction_dt = clamp(yaw_age_sec + 1/70, 0, 0.10)
 ```
 
-`angular_z_rad` 来自 odom 的 `twist.angular.z`，是有符号角速度；正负方向需要现场通过日志确认是否与 `current_yaw_deg` 增减一致。`move_to_target()` 会读取 `odom_runtime` 使用完整预测；`rotate_to_target_yaw_segmented(..., odom_runtime=...)` 传入 odom 后也会使用角速度，否则退化为只补偿 yaw 数据年龄和 1/70s 发送周期。
+`angular_z_rad` 来自 odom 的 `twist.angular.z`，是有符号角速度；正负方向需要现场通过日志确认是否与 `current_yaw_deg` 增减一致。`move_to_target()` 会读取 `odom_runtime` 使用完整预测；`rotate_to_target_yaw_segmented(..., odom_runtime=...)` 传入 odom 后也会使用角速度，否则退化为只补偿 yaw 数据年龄和 1/70s 发送周期。当前 `DEFAULT_ODOM_MAX_AGE_SEC = 0.25`，超过该年龄的 odom 不再参与 yaw 预测，本轮按 `angular_z_rad=0` 分配 ch0/ch2，避免旧角速度导致轨迹变弯。
 
 当前默认关键参数在 `move.py`：
 
@@ -425,8 +438,15 @@ DEFAULT_ROTATE_POSITION_KP = 900.0
 DEFAULT_ROTATE_POSITION_MAX_CMD = 600  # 旋转保持默认；移动默认用 cruise_forward_cmd/v 作为上限，也可传 position_hold_max_cmd
 DEFAULT_LATERAL_CMD_SIGN = -1
 DEFAULT_FORWARD_CMD_SIGN = 1
+DEFAULT_ODOM_MAX_AGE_SEC = 0.25
+DEFAULT_MOVE_YAW_SOFT_LIMIT_1_DEG = 10.0
+DEFAULT_MOVE_YAW_SOFT_LIMIT_1_MAX_CMD = 400
+DEFAULT_MOVE_YAW_SOFT_LIMIT_2_DEG = 25.0
+DEFAULT_MOVE_YAW_SOFT_LIMIT_2_MAX_CMD = 250
 DEFAULT_STOP_DISTANCE = 0.02m
 ```
+
+移动过程中会根据当前 yaw 与目标 yaw 的偏差动态限制平移输出上限：偏差 `>10deg` 时 `ch0/ch2` 向量最大输出不超过 `400`，偏差 `>25deg` 时不超过 `250`。这是软限幅，不会停止平移，只降低大角度转向时平移对底盘输出能力的占用。
 
 `move.move_backward_to_target(...)` 现在不再维护独立倒退闭环，而是把移动过程目标航向设置为输入最终角 `+180deg` 后复用 `move_to_target()`；到点后再把目标航向字段切回原始最终角。
 
@@ -681,7 +701,8 @@ pose4 存储:
 
 回 0 态:
   lock
-  ch4=1,ch5=2,ch6=0,ch7=0  0.1s
+  ch4=1,ch5=2,ch6=0,ch7=1  0.1s
+  ch4=1,ch5=2,ch6=0,ch7=3  0.5s
   ch4=1,ch5=1,ch6=1,ch7=1
   unlock
 ```

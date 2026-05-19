@@ -3,6 +3,7 @@ import sys
 
 from lib2 import tools
 from lib2 import position_backend
+from lib2 import position_resource
 
 
 position_lib = position_backend.get_position_backend()
@@ -38,8 +39,15 @@ DEFAULT_YAW_PREDICTION_MAX_DT_SEC = 0.10
 DEFAULT_DRIVE_LOOP_INTERVAL_SEC = 0.02
 # 移动到点主控制循环周期，单位 s。
 DEFAULT_MOVE_LOOP_INTERVAL_SEC = 0.02
+# 移动/位置保持闭环可接受的 odom 最大年龄，超过后不再使用角速度做 yaw 预测。
+DEFAULT_ODOM_MAX_AGE_SEC = 0.25
 # 移动时允许前进的最大航向误差，超过该角度则 ch2=0 只转向，单位 deg。
 DEFAULT_MOVE_GATE_DEG = 2.0
+# 移动时 yaw 偏差较大时的平移软限幅，避免平移输出占满底盘能力导致转向迟滞。
+DEFAULT_MOVE_YAW_SOFT_LIMIT_1_DEG = 10.0
+DEFAULT_MOVE_YAW_SOFT_LIMIT_1_MAX_CMD = 400
+DEFAULT_MOVE_YAW_SOFT_LIMIT_2_DEG = 25.0
+DEFAULT_MOVE_YAW_SOFT_LIMIT_2_MAX_CMD = 250
 # 距离目标较远时的默认前进通道值。
 DEFAULT_MOVE_FORWARD_CMD = 500
 # 旧 vector PID 输出最小有效通道值；保留为兼容参数。
@@ -296,6 +304,7 @@ def rotate_to_target_yaw_segmented(
     position_hold_max_cmd=DEFAULT_ROTATE_POSITION_MAX_CMD,
     segment_hold_sec=DEFAULT_SEGMENTED_YAW_HOLD_SEC,
     loop_interval_sec=DEFAULT_ROTATE_LOOP_INTERVAL_SEC,
+    odom_max_age_sec=DEFAULT_ODOM_MAX_AGE_SEC,
     timeout_sec=DEFAULT_ROTATE_TIMEOUT_SEC,
 ):
     """
@@ -385,7 +394,12 @@ def rotate_to_target_yaw_segmented(
         if current_yaw_deg is not None:
             current_yaw_deg = normalize_yaw_deg(current_yaw_deg)
             yaw_age_sec = 0.0 if latest_update_time is None else max(0.0, now - float(latest_update_time))
-            odometry = None if odom_runtime is None else odom_runtime.get_odometry(max_age_sec=None)
+            odometry = (
+                None
+                if odom_runtime is None
+                else odom_runtime.get_odometry(max_age_sec=odom_max_age_sec)
+            )
+            odometry_fresh = odometry is not None
             angular_z_rad = 0.0 if odometry is None else float(odometry["angular_z"])
             predicted_yaw_deg, yaw_prediction_dt_sec = predict_yaw_deg(
                 current_yaw_deg=current_yaw_deg,
@@ -439,6 +453,8 @@ def rotate_to_target_yaw_segmented(
                     "current_yaw_deg": float(current_yaw_deg),
                     "predicted_yaw_deg": float(predicted_yaw_deg),
                     "angular_z_rad": float(angular_z_rad),
+                    "odometry_fresh": bool(odometry_fresh),
+                    "odom_max_age_sec": float(odom_max_age_sec),
                     "yaw_prediction_dt_sec": float(yaw_prediction_dt_sec),
                     "target_yaw_deg": float(target_yaw_deg),
                     "des_yaw_deg": float(target_yaw_deg),
@@ -487,6 +503,8 @@ def rotate_to_target_yaw_segmented(
                 "current_yaw_deg": float(current_yaw_deg),
                 "predicted_yaw_deg": float(predicted_yaw_deg),
                 "angular_z_rad": float(angular_z_rad),
+                "odometry_fresh": bool(odometry_fresh),
+                "odom_max_age_sec": float(odom_max_age_sec),
                 "yaw_prediction_dt_sec": float(yaw_prediction_dt_sec),
                 "target_yaw_deg": float(target_yaw_deg),
                 "des_yaw_deg": float(active_des_yaw_deg),
@@ -1017,7 +1035,12 @@ def move_to_target(
     forward_cmd_sign=DEFAULT_FORWARD_CMD_SIGN,
     position_hold_kp=DEFAULT_ROTATE_POSITION_KP,
     position_hold_max_cmd=None,
+    yaw_soft_limit_1_deg=DEFAULT_MOVE_YAW_SOFT_LIMIT_1_DEG,
+    yaw_soft_limit_1_max_cmd=DEFAULT_MOVE_YAW_SOFT_LIMIT_1_MAX_CMD,
+    yaw_soft_limit_2_deg=DEFAULT_MOVE_YAW_SOFT_LIMIT_2_DEG,
+    yaw_soft_limit_2_max_cmd=DEFAULT_MOVE_YAW_SOFT_LIMIT_2_MAX_CMD,
     loop_interval_sec=DEFAULT_MOVE_LOOP_INTERVAL_SEC,
+    odom_max_age_sec=DEFAULT_ODOM_MAX_AGE_SEC,
     timeout_sec=None,
     reference="robot",
 ):
@@ -1061,9 +1084,9 @@ def move_to_target(
     while True:
         robot_pose = position_runtime.get_robot_pose()
         reference_pose = get_reference_pose(position_runtime, reference=reference)
-        odometry = odom_runtime.get_odometry(max_age_sec=None)
+        odometry = odom_runtime.get_odometry(max_age_sec=odom_max_age_sec)
 
-        if robot_pose is not None and reference_pose is not None and odometry is not None:
+        if robot_pose is not None and reference_pose is not None:
             current_x = float(reference_pose["x"])
             current_y = float(reference_pose["y"])
             current_z = float(reference_pose["z"])
@@ -1072,10 +1095,12 @@ def move_to_target(
             )
             latest_update_time = position_runtime.get_latest_update_time()
             now = tools.time.time()
-            yaw_age_sec = 0.0 if latest_update_time is None else max(0.0, now - float(latest_update_time))
-            linear_x = float(odometry["linear_x"])
-            linear_y = float(odometry["linear_y"])
-            angular_z_rad = float(odometry["angular_z"])
+            pose_age_sec = 0.0 if latest_update_time is None else max(0.0, now - float(latest_update_time))
+            yaw_age_sec = pose_age_sec
+            odometry_fresh = odometry is not None
+            linear_x = 0.0 if odometry is None else float(odometry["linear_x"])
+            linear_y = 0.0 if odometry is None else float(odometry["linear_y"])
+            angular_z_rad = 0.0 if odometry is None else float(odometry["angular_z"])
 
             if not values_are_finite(
                 current_x,
@@ -1095,7 +1120,24 @@ def move_to_target(
                 angular_z_rad=angular_z_rad,
                 yaw_age_sec=yaw_age_sec,
             )
+            position_prediction = position_resource.predict_position_xy(
+                current_x=current_x,
+                current_y=current_y,
+                linear_x=linear_x,
+                linear_y=linear_y,
+                position_age_sec=pose_age_sec,
+                control_delay_sec=DEFAULT_YAW_PREDICTION_CONTROL_DELAY_SEC,
+                max_prediction_dt_sec=DEFAULT_YAW_PREDICTION_MAX_DT_SEC,
+            )
+            pre_x = float(position_prediction["pre_x"])
+            pre_y = float(position_prediction["pre_y"])
             yaw_error_deg = heading_error_deg(current_yaw_deg, target_yaw_deg)
+            abs_yaw_error_deg = abs(float(yaw_error_deg))
+            dynamic_max_cmd = max_cmd
+            if abs_yaw_error_deg > float(yaw_soft_limit_2_deg):
+                dynamic_max_cmd = min(dynamic_max_cmd, abs(int(yaw_soft_limit_2_max_cmd)))
+            elif abs_yaw_error_deg > float(yaw_soft_limit_1_deg):
+                dynamic_max_cmd = min(dynamic_max_cmd, abs(int(yaw_soft_limit_1_max_cmd)))
             linear_speed_mps = math.hypot(linear_x, linear_y)
             distance_xy, dx, dy = distance_to_target_xy(
                 current_x=current_x,
@@ -1104,26 +1146,36 @@ def move_to_target(
                 target_y=target_y,
             )
 
-            result = is_target_reached(
-                current_x=current_x,
-                current_y=current_y,
-                target_x=target_x,
-                target_y=target_y,
-                linear_speed_mps=linear_speed_mps,
-                angular_z_rad=angular_z_rad,
-                stop_distance=stop_distance,
-                reached_speed_mps=reached_speed_mps,
-                reached_yaw_rate_rad=reached_yaw_rate_rad,
-            )
+            if odometry_fresh:
+                result = is_target_reached(
+                    current_x=current_x,
+                    current_y=current_y,
+                    target_x=target_x,
+                    target_y=target_y,
+                    linear_speed_mps=linear_speed_mps,
+                    angular_z_rad=angular_z_rad,
+                    stop_distance=stop_distance,
+                    reached_speed_mps=reached_speed_mps,
+                    reached_yaw_rate_rad=reached_yaw_rate_rad,
+                )
+            else:
+                result = {
+                    "distance_xy": float(distance_xy),
+                    "dx": float(dx),
+                    "dy": float(dy),
+                    "linear_speed_mps": float(linear_speed_mps),
+                    "angular_z_rad": float(angular_z_rad),
+                    "reached": False,
+                }
 
             motion_result = _calculate_position_hold_motion(
-                current_x=current_x,
-                current_y=current_y,
+                current_x=pre_x,
+                current_y=pre_y,
                 target_x=target_x,
                 target_y=target_y,
                 current_yaw_deg=predicted_yaw_deg,
                 position_hold_kp=position_hold_kp,
-                position_hold_max_cmd=max_cmd,
+                position_hold_max_cmd=dynamic_max_cmd,
                 stop_distance=stop_distance,
                 lateral_cmd_sign=lateral_cmd_sign,
                 forward_cmd_sign=forward_cmd_sign,
@@ -1142,19 +1194,36 @@ def move_to_target(
                 "current_x": current_x,
                 "current_y": current_y,
                 "current_z": current_z,
+                "pre_x": float(pre_x),
+                "pre_y": float(pre_y),
+                "pose_age_sec": float(pose_age_sec),
+                "position_prediction_dt_sec": float(position_prediction["position_prediction_dt_sec"]),
+                "position_prediction_control_delay_sec": float(position_prediction["control_delay_sec"]),
+                "position_prediction_max_dt_sec": float(position_prediction["max_prediction_dt_sec"]),
+                "position_prediction_used": True,
                 "current_yaw_deg": current_yaw_deg,
                 "predicted_yaw_deg": float(predicted_yaw_deg),
                 "yaw_age_sec": float(yaw_age_sec),
                 "yaw_prediction_dt_sec": float(yaw_prediction_dt_sec),
                 "angular_z_rad": float(angular_z_rad),
+                "odometry_fresh": bool(odometry_fresh),
+                "odom_max_age_sec": float(odom_max_age_sec),
                 "target_x": float(target_x),
                 "target_y": float(target_y),
                 "fixed_yaw_deg": float(target_yaw_deg),
                 "target_yaw_deg": float(target_yaw_deg),
                 "des_yaw_i16": int(des_yaw_i16),
                 "heading_error_deg": float(yaw_error_deg),
+                "abs_heading_error_deg": float(abs_yaw_error_deg),
                 "reference": reference,
                 "yaw_gate_active": False,
+                "yaw_soft_limit_1_deg": float(yaw_soft_limit_1_deg),
+                "yaw_soft_limit_1_max_cmd": int(yaw_soft_limit_1_max_cmd),
+                "yaw_soft_limit_2_deg": float(yaw_soft_limit_2_deg),
+                "yaw_soft_limit_2_max_cmd": int(yaw_soft_limit_2_max_cmd),
+                "yaw_soft_limited": bool(dynamic_max_cmd < max_cmd),
+                "base_position_hold_max_cmd": int(max_cmd),
+                "dynamic_position_hold_max_cmd": int(dynamic_max_cmd),
                 "lateral_error": float(motion_result["lateral_error"]),
                 "forward_error": float(motion_result["forward_error"]),
                 "scalar_cmd": float(motion_result["scalar_cmd"]),
@@ -1204,7 +1273,7 @@ def move_to_target(
                 return result
 
         if deadline is not None and tools.time.time() >= deadline:
-            if robot_pose is None or reference_pose is None or odometry is None:
+            if robot_pose is None or reference_pose is None:
                 return None
             if result is None:
                 return None
@@ -1246,7 +1315,12 @@ def move_backward_to_target(
     forward_cmd_sign=DEFAULT_FORWARD_CMD_SIGN,
     position_hold_kp=DEFAULT_ROTATE_POSITION_KP,
     position_hold_max_cmd=None,
+    yaw_soft_limit_1_deg=DEFAULT_MOVE_YAW_SOFT_LIMIT_1_DEG,
+    yaw_soft_limit_1_max_cmd=DEFAULT_MOVE_YAW_SOFT_LIMIT_1_MAX_CMD,
+    yaw_soft_limit_2_deg=DEFAULT_MOVE_YAW_SOFT_LIMIT_2_DEG,
+    yaw_soft_limit_2_max_cmd=DEFAULT_MOVE_YAW_SOFT_LIMIT_2_MAX_CMD,
     loop_interval_sec=DEFAULT_MOVE_LOOP_INTERVAL_SEC,
+    odom_max_age_sec=DEFAULT_ODOM_MAX_AGE_SEC,
     timeout_sec=None,
     reference="robot",
 ):
@@ -1302,7 +1376,12 @@ def move_backward_to_target(
             if position_hold_max_cmd is None
             else position_hold_max_cmd
         ),
+        yaw_soft_limit_1_deg=yaw_soft_limit_1_deg,
+        yaw_soft_limit_1_max_cmd=yaw_soft_limit_1_max_cmd,
+        yaw_soft_limit_2_deg=yaw_soft_limit_2_deg,
+        yaw_soft_limit_2_max_cmd=yaw_soft_limit_2_max_cmd,
         loop_interval_sec=loop_interval_sec,
+        odom_max_age_sec=odom_max_age_sec,
         timeout_sec=timeout_sec,
         reference=reference,
     )

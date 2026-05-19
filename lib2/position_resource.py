@@ -1,5 +1,6 @@
 import threading
 import time
+import math
 
 from lib2 import position_backend
 from lib2 import tools
@@ -18,6 +19,8 @@ ENTRANCE_Y = 0.92
 PRE_ENTRANCE_X = 1.80
 PRE_ENTRANCE_Y = 0.957
 STAIR_SIDE_LENGTH = 1.2 #m
+DEFAULT_POSITION_PREDICTION_CONTROL_DELAY_SEC = 1.0 / 70.0
+DEFAULT_POSITION_PREDICTION_MAX_DT_SEC = 0.10
 
 
 def get_position_lib():
@@ -200,9 +203,110 @@ def _stamp_to_sec(stamp_msg):
     return float(stamp_msg.sec) + float(stamp_msg.nanosec) * 1e-9
 
 
+def _quaternion_to_yaw(qx, qy, qz, qw):
+    norm = math.sqrt(qx * qx + qy * qy + qz * qz + qw * qw)
+    if norm < 1e-12:
+        return 0.0
+
+    qx /= norm
+    qy /= norm
+    qz /= norm
+    qw /= norm
+
+    siny_cosp = 2.0 * (qw * qz + qx * qy)
+    cosy_cosp = 1.0 - 2.0 * (qy * qy + qz * qz)
+    return math.atan2(siny_cosp, cosy_cosp)
+
+
+def _rotate_xy_by_yaw(x, y, yaw_rad):
+    cos_yaw = math.cos(float(yaw_rad))
+    sin_yaw = math.sin(float(yaw_rad))
+    return (
+        cos_yaw * float(x) - sin_yaw * float(y),
+        sin_yaw * float(x) + cos_yaw * float(y),
+    )
+
+
+def predict_position_xy(
+    current_x,
+    current_y,
+    linear_x,
+    linear_y,
+    position_age_sec=0.0,
+    control_delay_sec=DEFAULT_POSITION_PREDICTION_CONTROL_DELAY_SEC,
+    max_prediction_dt_sec=DEFAULT_POSITION_PREDICTION_MAX_DT_SEC,
+):
+    """
+    使用地图坐标系下的平面速度预测当前位置。
+
+    linear_x/linear_y 应来自 extract_odometry_params() 变换后的速度。
+    """
+    prediction_dt_sec = max(0.0, float(position_age_sec) + float(control_delay_sec))
+    prediction_dt_sec = min(prediction_dt_sec, float(max_prediction_dt_sec))
+    pre_x = float(current_x) + float(linear_x) * prediction_dt_sec
+    pre_y = float(current_y) + float(linear_y) * prediction_dt_sec
+    return {
+        "current_x": float(current_x),
+        "current_y": float(current_y),
+        "pre_x": float(pre_x),
+        "pre_y": float(pre_y),
+        "linear_x": float(linear_x),
+        "linear_y": float(linear_y),
+        "position_age_sec": float(position_age_sec),
+        "position_prediction_dt_sec": float(prediction_dt_sec),
+        "control_delay_sec": float(control_delay_sec),
+        "max_prediction_dt_sec": float(max_prediction_dt_sec),
+    }
+
+
+def predict_pose_xy(
+    pose,
+    odometry,
+    position_age_sec=0.0,
+    control_delay_sec=DEFAULT_POSITION_PREDICTION_CONTROL_DELAY_SEC,
+    max_prediction_dt_sec=DEFAULT_POSITION_PREDICTION_MAX_DT_SEC,
+):
+    """
+    对 pose 字典中的 x/y 做平面预测。
+
+    odometry 为 None 时使用 0 速度，预测位置等于当前 pose。
+    """
+    linear_x = 0.0 if odometry is None else float(odometry["linear_x"])
+    linear_y = 0.0 if odometry is None else float(odometry["linear_y"])
+    result = predict_position_xy(
+        current_x=float(pose["x"]),
+        current_y=float(pose["y"]),
+        linear_x=linear_x,
+        linear_y=linear_y,
+        position_age_sec=position_age_sec,
+        control_delay_sec=control_delay_sec,
+        max_prediction_dt_sec=max_prediction_dt_sec,
+    )
+    if "z" in pose:
+        result["current_z"] = float(pose["z"])
+        result["pre_z"] = float(pose["z"])
+    return result
+
+
 def extract_odometry_params(odom_msg: Odometry):
     pose = odom_msg.pose.pose
     twist = odom_msg.twist.twist
+    yaw_rad = _quaternion_to_yaw(
+        pose.orientation.x,
+        pose.orientation.y,
+        pose.orientation.z,
+        pose.orientation.w,
+    )
+    linear_x, linear_y = _rotate_xy_by_yaw(
+        twist.linear.x,
+        twist.linear.y,
+        yaw_rad,
+    )
+    angular_x, angular_y = _rotate_xy_by_yaw(
+        twist.angular.x,
+        twist.angular.y,
+        yaw_rad,
+    )
 
     return {
         "header": odom_msg.header,
@@ -216,12 +320,23 @@ def extract_odometry_params(odom_msg: Odometry):
         "orientation_y": float(pose.orientation.y),
         "orientation_z": float(pose.orientation.z),
         "orientation_w": float(pose.orientation.w),
-        "linear_x": float(twist.linear.x),
-        "linear_y": float(twist.linear.y),
+        "yaw_rad": float(yaw_rad),
+        "yaw_deg": float(math.degrees(yaw_rad)),
+        "raw_linear_x": float(twist.linear.x),
+        "raw_linear_y": float(twist.linear.y),
+        "raw_linear_z": float(twist.linear.z),
+        "raw_angular_x": float(twist.angular.x),
+        "raw_angular_y": float(twist.angular.y),
+        "raw_angular_z": float(twist.angular.z),
+        "linear_x": float(linear_x),
+        "linear_y": float(linear_y),
         "linear_z": float(twist.linear.z),
-        "angular_x": float(twist.angular.x),
-        "angular_y": float(twist.angular.y),
+        "angular_x": float(angular_x),
+        "angular_y": float(angular_y),
         "angular_z": float(twist.angular.z),
+        "velocity_transform": "pose_yaw_child_to_parent",
+        "velocity_source_frame_id": odom_msg.child_frame_id,
+        "velocity_frame_id": odom_msg.header.frame_id,
         "pose_covariance": list(odom_msg.pose.covariance),
         "twist_covariance": list(odom_msg.twist.covariance),
         "pose": odom_msg.pose,
@@ -344,6 +459,17 @@ class OdomRuntime:
             "angular_x": float(odometry["angular_x"]),
             "angular_y": float(odometry["angular_y"]),
             "angular_z": float(odometry["angular_z"]),
+            "raw_linear_x": float(odometry["raw_linear_x"]),
+            "raw_linear_y": float(odometry["raw_linear_y"]),
+            "raw_linear_z": float(odometry["raw_linear_z"]),
+            "raw_angular_x": float(odometry["raw_angular_x"]),
+            "raw_angular_y": float(odometry["raw_angular_y"]),
+            "raw_angular_z": float(odometry["raw_angular_z"]),
+            "velocity_transform": odometry["velocity_transform"],
+            "velocity_source_frame_id": odometry["velocity_source_frame_id"],
+            "velocity_frame_id": odometry["velocity_frame_id"],
+            "yaw_rad": float(odometry["yaw_rad"]),
+            "yaw_deg": float(odometry["yaw_deg"]),
         }
 
     def get_linear_speed_mps(self, max_age_sec=None):

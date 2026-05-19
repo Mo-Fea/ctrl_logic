@@ -923,15 +923,24 @@ def start_kfs_post_suction_thread(
             "completed": True,
         }
 
-    def trigger_kfs_zero_return_with_lock(return_sec=0.1):
+    def trigger_kfs_zero_return_with_lock(arm_sec=0.1, fire_sec=0.5):
         with tools.AUTO_TRIGGER_LOCK:
-            zero_channel_values = {
+            arm_channel_values = {
                 KFS_SUCTION_CHANNEL_INDEX: KFS_SUCTION_OFF_VALUE,
                 KFS_MODE_CHANNEL_INDEX: KFS_MODE_VALUE,
                 KFS_POSE_CHANNEL_INDEX: 0,
-                KFS_TRIGGER_CHANNEL_INDEX: 0,
+                KFS_TRIGGER_CHANNEL_INDEX: KFS_TRIGGER_IDLE_VALUE,
             }
-            zero_channels = repeat_set_channel_values(zero_channel_values, return_sec)
+            arm_channels = repeat_set_channel_values(arm_channel_values, arm_sec)
+
+            fire_channel_values = {
+                KFS_SUCTION_CHANNEL_INDEX: KFS_SUCTION_OFF_VALUE,
+                KFS_MODE_CHANNEL_INDEX: KFS_MODE_VALUE,
+                KFS_POSE_CHANNEL_INDEX: 0,
+                KFS_TRIGGER_CHANNEL_INDEX: 3,
+            }
+            fire_channels = repeat_set_channel_values(fire_channel_values, fire_sec)
+
             idle_channel_values = {
                 KFS_SUCTION_CHANNEL_INDEX: KFS_SUCTION_OFF_VALUE,
                 KFS_MODE_CHANNEL_INDEX: tools.SAFE_SWITCH_VALUE,
@@ -943,9 +952,11 @@ def start_kfs_post_suction_thread(
         return {
             "pose_id": 0,
             "pose_name": "zero_return",
-            "channels": zero_channels,
+            "arm_channels": arm_channels,
+            "fire_channels": fire_channels,
             "idle_channels": idle_channels,
-            "return_sec": float(return_sec),
+            "arm_sec": float(arm_sec),
+            "fire_sec": float(fire_sec),
             "completed": True,
         }
 
@@ -970,7 +981,10 @@ def start_kfs_post_suction_thread(
             release_result = release_kfs_suction_with_lock()
             time.sleep(2.0)
 
-            zero_pose_result = trigger_kfs_zero_return_with_lock(return_sec=0.1)
+            zero_pose_result = trigger_kfs_zero_return_with_lock(
+                arm_sec=0.1,
+                fire_sec=0.5,
+            )
 
             reset_channels = None
             if reset_kfs_channels:
