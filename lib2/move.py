@@ -20,7 +20,7 @@ DEFAULT_ROTATE_LOOP_INTERVAL_SEC = 0.02
 DEFAULT_ROTATE_TIMEOUT_SEC = 20.0
 # 分段旋转每次给下位机的目标航向增量，单位 deg，用于降低一次性大角度目标对PID的冲击。
 DEFAULT_SEGMENTED_YAW_STEP_DEG = None
-DEFAULT_SEGMENTED_YAW_STEP_DEG_CURRENT_POSITION = 10.0
+DEFAULT_SEGMENTED_YAW_STEP_DEG_CURRENT_POSITION = 45.0
 DEFAULT_SEGMENTED_YAW_STEP_DEG_INPUT_POSITION = 360.0
 # 分段旋转每个中间目标至少保持的时间，单位 s。
 DEFAULT_SEGMENTED_YAW_HOLD_SEC = 0.08
@@ -87,13 +87,13 @@ DEFAULT_CLIMB_SUCCESS_TIMEOUT_SEC = 10.0
 # 上楼梯完成所需的最小水平位移，单位 m。
 DEFAULT_CLIMB_MIN_DISTANCE = 0.4
 # 上楼梯触发通道保持时间，单位 s。
-DEFAULT_CLIMB_TRIGGER_HOLD_SEC = 3.0
+DEFAULT_CLIMB_TRIGGER_HOLD_SEC = 0.3
 # 上楼梯触发前用于形成 1 -> 3 上升沿的预置时间，单位 s。
 DEFAULT_CLIMB_TRIGGER_ARM_SEC = 0.1
 # 上楼梯流程最大允许时间，超过该时间后打印错误并终止程序，单位 s。
 DEFAULT_CLIMB_TIMEOUT_SEC = 15.0
 # 下楼梯触发通道保持时间，单位 s。
-DEFAULT_DESCEND_TRIGGER_HOLD_SEC = 3.0
+DEFAULT_DESCEND_TRIGGER_HOLD_SEC = 0.3
 # 下楼梯触发前用于形成离开3再进入3的预置时间，单位 s。
 DEFAULT_DESCEND_TRIGGER_ARM_SEC = 0.1
 # 升降模式通道索引，ch5。
@@ -230,11 +230,6 @@ def rotate_to_target_yaw(
     """
     if float(target_yaw_deg) == 0.0:
         channels = set_motion_channels(sender, des_yaw_i16=0)
-        segment_step_result = (
-            DEFAULT_SEGMENTED_YAW_STEP_DEG_CURRENT_POSITION
-            if segment_step_deg is None
-            else float(segment_step_deg)
-        )
         return {
             "channels": channels,
             "current_yaw_deg": position_runtime.get_current_yaw_deg(),
@@ -310,8 +305,9 @@ def rotate_to_target_yaw_segmented(
     segment_step_deg 的中间目标；当剩余误差小于该步长后，直接给最终目标角。
     未显式传 segment_step_deg 时，des_x/des_y 都为 0 使用 10deg，否则使用 360deg。
     des_x/des_y 都为 0 时，进入函数后记录机器人当前位置；否则使用传入坐标。
-    旋转过程中用低速 ch0/ch2 把机器人保持在
-    初始点附近；退出条件为 yaw 稳定到位且当前位置回到初始点 position_tolerance 内。
+    旋转过程中用低速 ch0/ch2 把机器人保持在初始点附近。
+    des_x/des_y 都为 0 时，退出条件只检查 yaw 稳定到位；
+    显式传入 des_x/des_y 时，退出条件还要求当前位置回到 position_tolerance 内。
     """
     if float(target_yaw_deg) == 0.0:
         channels = set_motion_channels(sender, des_yaw_i16=0)
@@ -328,6 +324,8 @@ def rotate_to_target_yaw_segmented(
             "des_yaw_i16": 0,
             "heading_error_deg": None,
             "heading_reached": True,
+            "position_reached": None,
+            "require_position_reached": False,
             "stable_sec": float(stable_sec),
             "stable_elapsed_sec": 0.0,
             "segment_step_deg": float(segment_step_result),
@@ -340,6 +338,7 @@ def rotate_to_target_yaw_segmented(
         raise ValueError(f"segment_hold_sec must be >= 0, got {segment_hold_sec}")
     des_x = float(des_x)
     des_y = float(des_y)
+    require_position_reached = not (des_x == 0.0 and des_y == 0.0)
     if segment_step_deg is None:
         segment_step_deg = (
             DEFAULT_SEGMENTED_YAW_STEP_DEG_CURRENT_POSITION
@@ -428,7 +427,8 @@ def rotate_to_target_yaw_segmented(
                 stable_since = None
             stable_elapsed_sec = 0.0 if stable_since is None else (now - stable_since)
 
-            if in_threshold and stable_elapsed_sec >= float(stable_sec) and position_reached:
+            exit_position_reached = (not require_position_reached) or position_reached
+            if in_threshold and stable_elapsed_sec >= float(stable_sec) and exit_position_reached:
                 final_des_yaw_i16 = encode_target_yaw_i16(target_yaw_deg)
                 channels = set_motion_channels(sender, des_yaw_i16=final_des_yaw_i16)
                 return {
@@ -451,6 +451,7 @@ def rotate_to_target_yaw_segmented(
                         else float(position_distance_xy)
                     ),
                     "position_reached": bool(position_reached),
+                    "require_position_reached": bool(require_position_reached),
                     "position_tolerance": float(position_tolerance),
                     "stable_sec": float(stable_sec),
                     "stable_elapsed_sec": float(stable_elapsed_sec),
@@ -500,6 +501,7 @@ def rotate_to_target_yaw_segmented(
                 "position_dx": None if position_dx is None else float(position_dx),
                 "position_dy": None if position_dy is None else float(position_dy),
                 "position_reached": bool(position_reached),
+                "require_position_reached": bool(require_position_reached),
                 "position_tolerance": float(position_tolerance),
                 "position_lateral_cmd": int(channels[0]),
                 "position_forward_cmd": int(channels[2]),
@@ -553,32 +555,32 @@ def wait_with_target_yaw(
     }
 
 
-def reset_weapon_after_fetch(sender):
+def reset_weapon_after_fetch(sender, settle_sec=1.0):
     """
-    阻塞式 weapon 复位动作。
+    阻塞式 weapon 松开并放下动作。
 
-    1. ch4=1，先释放 weapon 气缸。
-    2. 等待 3s。
-    3. ch1=0, ch5=1，停止 weapon 抬升并退出 weapon 模式。
+    1. ch4=1, ch1=0，松开夹爪并放下。
+    2. 等待 settle_sec。
+    3. ch5=1，退出 weapon 模式并切回默认模式。
     """
-    release_channels = set_channel_values(
-        sender,
-        channel_values={
-            4: tools.SAFE_SWITCH_VALUE,
-        },
-    )
-    tools.time.sleep(3.0)
-    reset_channels = set_channel_values(
+    release_and_lower_channels = set_channel_values(
         sender,
         channel_values={
             1: 0,
+            4: tools.SAFE_SWITCH_VALUE,
+        },
+    )
+    tools.time.sleep(float(settle_sec))
+    reset_channels = set_channel_values(
+        sender,
+        channel_values={
             5: tools.SAFE_SWITCH_VALUE,
         },
     )
     return {
-        "release_channels": release_channels,
+        "release_and_lower_channels": release_and_lower_channels,
         "reset_channels": reset_channels,
-        "release_wait_sec": 3.0,
+        "settle_sec": float(settle_sec),
         "completed": True,
     }
 
@@ -1351,7 +1353,7 @@ def climb(
     1. 记录进入函数时的 x/y/z。
     2. 输出升降模式 ch5=1，底盘通道 ch0/ch2/ch3 保持 0。
     3. ch7 先置 1，再置 3，形成 1 -> 3 上升沿触发半自动上楼梯。
-    4. ch7=3 保持 trigger_hold_sec 后回归 0。
+    4. ch7=3 保持 trigger_hold_sec 后回归 1。
     5. 阻塞等待水平位移大于 min_distance，且 current_z - 0.15 > start_z。
     6. 总流程超过 timeout_sec 后打印“上楼梯错误”并终止程序。
     """
@@ -1369,20 +1371,21 @@ def climb(
             CLIMB_TRIGGER_CHANNEL_INDEX: int(trigger_value),
         }
 
-    arm_channel_values = climb_channel_values(CLIMB_TRIGGER_ARM_VALUE)
-    arm_deadline = tools.time.time() + float(trigger_arm_sec)
-    while tools.time.time() < arm_deadline:
-        arm_channels = set_channel_values(sender, channel_values=arm_channel_values)
-        tools.time.sleep(loop_interval_sec)
+    with tools.AUTO_TRIGGER_LOCK:
+        arm_channel_values = climb_channel_values(CLIMB_TRIGGER_ARM_VALUE)
+        arm_deadline = tools.time.time() + float(trigger_arm_sec)
+        while tools.time.time() < arm_deadline:
+            arm_channels = set_channel_values(sender, channel_values=arm_channel_values)
+            tools.time.sleep(loop_interval_sec)
 
-    fire_channel_values = climb_channel_values(CLIMB_TRIGGER_FIRE_VALUE)
-    fire_deadline = tools.time.time() + float(trigger_hold_sec)
-    while tools.time.time() < fire_deadline:
-        fire_channels = set_channel_values(sender, channel_values=fire_channel_values)
-        tools.time.sleep(loop_interval_sec)
+        fire_channel_values = climb_channel_values(CLIMB_TRIGGER_FIRE_VALUE)
+        fire_deadline = tools.time.time() + float(trigger_hold_sec)
+        while tools.time.time() < fire_deadline:
+            fire_channels = set_channel_values(sender, channel_values=fire_channel_values)
+            tools.time.sleep(loop_interval_sec)
 
-    idle_channel_values = climb_channel_values(CLIMB_TRIGGER_IDLE_VALUE)
-    idle_channels = set_channel_values(sender, channel_values=idle_channel_values)
+        idle_channel_values = climb_channel_values(CLIMB_TRIGGER_IDLE_VALUE)
+        idle_channels = set_channel_values(sender, channel_values=idle_channel_values)
 
     deadline = None if timeout_sec is None else (tools.time.time() + float(timeout_sec))
     result = {
@@ -1415,8 +1418,6 @@ def climb(
             })
             if result["success"]:
                 return result
-
-        idle_channels = set_channel_values(sender, channel_values=idle_channel_values)
 
         if deadline is not None and tools.time.time() >= deadline:
             print("上楼梯错误")
@@ -1453,22 +1454,24 @@ def descend(
         return {
             CLIMB_MODE_CHANNEL_INDEX: CLIMB_MODE_VALUE,
             DESCEND_TRIGGER_CHANNEL_INDEX: int(trigger_value),
+            CLIMB_TRIGGER_CHANNEL_INDEX: CLIMB_TRIGGER_IDLE_VALUE,
         }
 
-    arm_channel_values = descend_channel_values(DESCEND_TRIGGER_ARM_VALUE)
-    arm_deadline = tools.time.time() + float(trigger_arm_sec)
-    while tools.time.time() < arm_deadline:
-        arm_channels = set_channel_values(sender, channel_values=arm_channel_values)
-        tools.time.sleep(loop_interval_sec)
+    with tools.AUTO_TRIGGER_LOCK:
+        arm_channel_values = descend_channel_values(DESCEND_TRIGGER_ARM_VALUE)
+        arm_deadline = tools.time.time() + float(trigger_arm_sec)
+        while tools.time.time() < arm_deadline:
+            arm_channels = set_channel_values(sender, channel_values=arm_channel_values)
+            tools.time.sleep(loop_interval_sec)
 
-    fire_channel_values = descend_channel_values(DESCEND_TRIGGER_FIRE_VALUE)
-    fire_deadline = tools.time.time() + float(trigger_hold_sec)
-    while tools.time.time() < fire_deadline:
-        fire_channels = set_channel_values(sender, channel_values=fire_channel_values)
-        tools.time.sleep(loop_interval_sec)
+        fire_channel_values = descend_channel_values(DESCEND_TRIGGER_FIRE_VALUE)
+        fire_deadline = tools.time.time() + float(trigger_hold_sec)
+        while tools.time.time() < fire_deadline:
+            fire_channels = set_channel_values(sender, channel_values=fire_channel_values)
+            tools.time.sleep(loop_interval_sec)
 
-    idle_channel_values = descend_channel_values(DESCEND_TRIGGER_IDLE_VALUE)
-    idle_channels = set_channel_values(sender, channel_values=idle_channel_values)
+        idle_channel_values = descend_channel_values(DESCEND_TRIGGER_IDLE_VALUE)
+        idle_channels = set_channel_values(sender, channel_values=idle_channel_values)
 
     result = {
         "start_z": start_z,
@@ -1494,7 +1497,6 @@ def descend(
             if height_reached:
                 return result
 
-        idle_channels = set_channel_values(sender, channel_values=idle_channel_values)
         tools.time.sleep(loop_interval_sec)
 
 

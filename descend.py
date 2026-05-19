@@ -8,9 +8,19 @@ from lib2 import module, tools
 
 LIDAR_TYPE = 1
 ODOM_TOPIC = "/odin1/odometry_highfreq"
-WEAPON_ID = 1
-MOVE_SPEED = 300
-HOLD_AFTER_DONE_SEC = 5.0
+
+START_STAIR_ID = -1
+CLIMB_FROM_STAIR_ID = -1
+CLIMB_TO_STAIR_ID = 2
+DESCEND_FROM_STAIR_ID = 2
+DESCEND_TO_STAIR_ID = -1
+KFS_GRAB_FROM_STAIR_ID = 2
+KFS_GRAB_TO_STAIR_ID = 5
+
+START_FIXED_YAW_DEG = 0.01
+MOVE_SPEED = 600
+FINAL_DIRECTION = 1
+HOLD_AFTER_DONE_SEC = 3.0
 
 WAIT_READY_TIMEOUT_SEC = 8.0
 WAIT_READY_STABLE_FRAMES = 5
@@ -28,22 +38,17 @@ def wait_runtime_ready(position_runtime, odom_runtime):
 
     while time.time() < deadline:
         robot_pose = position_runtime.get_robot_pose()
-        weapon_pose = position_runtime.get_weapon_pose()
         update_time = position_runtime.get_latest_update_time()
         odometry = odom_runtime.get_odometry(max_age_sec=MAX_READY_DATA_AGE_SEC)
 
         data_finite = (
-            robot_pose is not None
-            and weapon_pose is not None
+            robot_pose is not None 
             and odometry is not None
             and values_are_finite(
                 robot_pose["x"],
                 robot_pose["y"],
                 robot_pose["z"],
                 robot_pose["yaw"],
-                weapon_pose["x"],
-                weapon_pose["y"],
-                weapon_pose["z"],
                 odometry["linear_x"],
                 odometry["linear_y"],
                 odometry["angular_z"],
@@ -66,38 +71,6 @@ def wait_runtime_ready(position_runtime, odom_runtime):
     return False
 
 
-def print_weapon_debug(position_runtime, weapon_id):
-    position_lib = module.get_position_lib()
-    weapon_targets = getattr(position_lib, "WEAPON_TARGETS", {})
-    target = weapon_targets.get(int(weapon_id))
-    weapon_pose = position_runtime.get_weapon_pose()
-    robot_pose = position_runtime.get_robot_pose()
-
-    print(f"weapon target[{weapon_id}] = {target}")
-    if robot_pose is not None:
-        print(
-            "robot_pose: "
-            f"x={float(robot_pose['x']):.3f}, "
-            f"y={float(robot_pose['y']):.3f}, "
-            f"z={float(robot_pose['z']):.3f}, "
-            f"yaw={math.degrees(float(robot_pose['yaw'])):.2f}deg"
-        )
-    if weapon_pose is not None:
-        print(
-            "weapon_pose: "
-            f"x={float(weapon_pose['x']):.3f}, "
-            f"y={float(weapon_pose['y']):.3f}, "
-            f"z={float(weapon_pose['z']):.3f}"
-        )
-    if target is not None and weapon_pose is not None:
-        dx = float(target[0]) - float(weapon_pose["x"])
-        dy = float(target[1]) - float(weapon_pose["y"])
-        print(
-            "weapon distance to target: "
-            f"dx={dx:.3f}, dy={dy:.3f}, dist={math.hypot(dx, dy):.3f}m"
-        )
-
-
 def main():
     sender = None
     flag_node = None
@@ -107,39 +80,118 @@ def main():
     odom_runtime = None
 
     try:
-        print(f"Starting fetch_weapon test, weapon_id={WEAPON_ID}, speed={MOVE_SPEED}...")
+        print("Starting descend test: -1 -> 2 climb, then 2 -> -1 descend...")
         sender, _, flag_node, flag_thread, flag_stop_event = module.init(
             lidar_type=LIDAR_TYPE
         )
         position_runtime = module.start_position_thread(sender)
         odom_runtime = module.start_odometry_thread(topic=ODOM_TOPIC)
 
-        print("Waiting for robot/weapon pose and odometry...")
+        print("Waiting for robot pose and odometry...")
         if not wait_runtime_ready(position_runtime, odom_runtime):
-            print("fetch_weapon test failed: runtime data not ready.")
+            print("Descend test failed: runtime data not ready.")
             return
 
-        print_weapon_debug(position_runtime, WEAPON_ID)
-
-        print(f"Executing module.fetch_weapon(weapon_id={WEAPON_ID})...")
-        weapon_result = module.fetch_weapon(
+        start_x, start_y = module.get_stair_xy(START_STAIR_ID)
+        print(
+            f"Moving to stair {START_STAIR_ID} "
+            f"({start_x:.3f}, {start_y:.3f}) "
+            f"with fixed_yaw={START_FIXED_YAW_DEG:.2f} deg..."
+        )
+        start_move_result = module.move_to_des(
             sender=sender,
             position_runtime=position_runtime,
             odom_runtime=odom_runtime,
-            weapon_id=WEAPON_ID,
+            x=start_x,
+            y=start_y,
+            target_deg=START_FIXED_YAW_DEG,
             v=MOVE_SPEED,
         )
-        print("fetch_weapon returned:")
-        print(weapon_result)
-        print_weapon_debug(position_runtime, WEAPON_ID)
-
-        if not weapon_result or not weapon_result.get("grab_result", {}).get("completed", False):
-            print("fetch_weapon test failed before grab completed.")
+        if start_move_result is None:
+            print("Descend test failed: move to -1 failed.")
             return
+        print("Move to -1 finished.")
+        print(start_move_result)
+
+        climb_direction = tools.stair_id_to_direction(
+            CLIMB_FROM_STAIR_ID,
+            CLIMB_TO_STAIR_ID,
+        )
+        climb_target_x, climb_target_y = module.get_stair_xy(CLIMB_TO_STAIR_ID)
+        print(
+            f"Climbing {CLIMB_FROM_STAIR_ID}->{CLIMB_TO_STAIR_ID}: "
+            f"direction={climb_direction}, target=({climb_target_x:.3f}, {climb_target_y:.3f})"
+        )
+        climb_result = module.climb(
+            sender=sender,
+            position_runtime=position_runtime,
+            odom_runtime=odom_runtime,
+            direction1=climb_direction,
+            direction2=FINAL_DIRECTION,
+            x=climb_target_x,
+            y=climb_target_y,
+            move_speed=MOVE_SPEED,
+        )
+        print("Climb finished.")
+        print(climb_result)
+
+        grab_direction = tools.stair_id_to_direction(
+            KFS_GRAB_FROM_STAIR_ID,
+            KFS_GRAB_TO_STAIR_ID,
+        )
+        grab_action_row = [
+            KFS_GRAB_FROM_STAIR_ID,
+            KFS_GRAB_TO_STAIR_ID,
+            grab_direction,
+            0,
+            1,
+        ]
+        print(
+            f"KFS grab {KFS_GRAB_FROM_STAIR_ID}->{KFS_GRAB_TO_STAIR_ID}: "
+            f"action_row={grab_action_row}"
+        )
+        grab_result = module.execute_action_row(
+            sender=sender,
+            position_runtime=position_runtime,
+            odom_runtime=odom_runtime,
+            action_row=grab_action_row,
+            final_direction=FINAL_DIRECTION,
+            next_from_pose=DESCEND_FROM_STAIR_ID,
+            next_to_pose=DESCEND_TO_STAIR_ID,
+            next_height_action=1,
+        )
+        print("KFS grab finished.")
+        print(grab_result)
+
+        descend_direction = tools.stair_id_to_direction(
+            DESCEND_FROM_STAIR_ID,
+            DESCEND_TO_STAIR_ID,
+        )
+        descend_from_x, descend_from_y = module.get_stair_xy(DESCEND_FROM_STAIR_ID)
+        descend_target_x, descend_target_y = module.get_stair_xy(DESCEND_TO_STAIR_ID)
+        print(
+            f"Descending {DESCEND_FROM_STAIR_ID}->{DESCEND_TO_STAIR_ID}: "
+            f"direction={descend_direction}, "
+            f"target=({descend_target_x:.3f}, {descend_target_y:.3f})"
+        )
+        descend_result = module.descend(
+            sender=sender,
+            position_runtime=position_runtime,
+            odom_runtime=odom_runtime,
+            direction1=descend_direction,
+            direction2=FINAL_DIRECTION,
+            current_x=descend_from_x,
+            current_y=descend_from_y,
+            des_x=descend_target_x,
+            des_y=descend_target_y,
+            move_speed=MOVE_SPEED,
+        )
+        print("Descend finished.")
+        print(descend_result)
 
         print(f"Holding current output for {HOLD_AFTER_DONE_SEC:.1f}s before shutdown...")
         time.sleep(HOLD_AFTER_DONE_SEC)
-        print("fetch_weapon test completed.")
+        print("Descend test completed.")
 
     except KeyboardInterrupt:
         print("\nStopped by user.")

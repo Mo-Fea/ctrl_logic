@@ -9,22 +9,22 @@ from tf2_msgs.msg import TFMessage
 import math
 
 
-ENTRANCE_X = 0.586
-ENTRANCE_Y = -1.776
+ENTRANCE_X = 0.565
+ENTRANCE_Y = -1.817
 PRE_ENTRANCE_X = -0.500
 PRE_ENTRANCE_Y = -1.776
 WEAPON_TARGETS = {
-    1: (-2.638, 1.40),
-    2: (-2.441, 1.40),
-    3: (-2.243, 1.40),
-    4: (-2.036, 1.40),
-    5: (-1.834, 1.40),
-    6: (-1.641, 1.40),
+    1: (-2.22, 1.31),
+    2: (-2.01, 1.32),
+    3: (-1.82, 1.33),
+    4: (-1.61, 1.33),
+    5: (-1.418, 1.33),
+    6: (-1.22, 1.34),
 }
 WEAPON_RETREAT_STOP_Y = 4.00
 
 LIDAR_TO_BASE_X = - 0.227  # m
-LIDAR_TO_BASE_Y = - 0.244
+LIDAR_TO_BASE_Y = - 0.266
 LIDAR_TO_BASE_Z = 0.0
 T_LIDAR_TO_BASE = np.array([
     [1.0, 0.0, 0.0, LIDAR_TO_BASE_X],
@@ -34,8 +34,8 @@ T_LIDAR_TO_BASE = np.array([
 ], dtype=float)
 
 
-LIDAR_TO_WEAPON_X = 0.283  # m
-LIDAR_TO_WEAPON_Y = -0.564  # m
+LIDAR_TO_WEAPON_X = 0.107  # m
+LIDAR_TO_WEAPON_Y = -0.446  # m
 LIDAR_TO_WEAPON_Z = 0.0  # m
 T_LIDAR_TO_WEAPON = np.array([
     [1.0, 0.0, 0.0, LIDAR_TO_WEAPON_X],
@@ -452,7 +452,6 @@ def cal_weapon_position(T_map_lidar: np.ndarray):
         "T_map_weapon": T_map_weapon,
     }
 #-----------------------------------------------------------------------------------------------------
-
 
 
 

@@ -1,5 +1,6 @@
-import time
 import sys
+import threading
+import time
 
 from lib2 import tools
 from lib2 import move as move_lib
@@ -9,6 +10,7 @@ from lib2 import position_resource
 
 ODOM_TOPIC = position_resource.ODOM_TOPIC
 PRE_DESCEND_ADJUST_DISTANCE = 0.3 #m
+STAIR_MOVE_MAX_CMD = 200
 KFS_SUCTION_CHANNEL_INDEX = 4
 KFS_MODE_CHANNEL_INDEX = 5
 KFS_POSE_CHANNEL_INDEX = 6
@@ -19,7 +21,7 @@ KFS_SUCTION_ON_VALUE = 3
 KFS_TRIGGER_IDLE_VALUE = 1
 DEFAULT_KFS_SUCTION_EDGE_ARM_SEC = 0.1
 DEFAULT_KFS_SUCTION_EDGE_HOLD_SEC = 0.1
-DEFAULT_KFS_SUCTION_HOLD_SEC = 3.0
+DEFAULT_KFS_SUCTION_HOLD_SEC = 2.0
 ACTION_MATRIX_COLUMNS = [
     "from_pos",
     "to_pos",
@@ -28,6 +30,18 @@ ACTION_MATRIX_COLUMNS = [
     "grab_action",
 ]
 ACTION_MATRIX_ROW_SIZE = 5
+
+CHALLENGE_ACTION_MATRIX = [
+    [-1,2,1,1,0],
+    [2,5,1,0,1],
+    [2,5,1,1,0],
+    [5,8,1,0,1],
+    [5,8,1,1,0],
+    [8,11,1,1,0],
+    [11,10,2,1,0],
+    [10,13,1,1,0]
+
+]
 
 
 def __getattr__(name):
@@ -707,9 +721,9 @@ def fetch_and_store_kfs(
     1. 按 stair_id + direction 正向微调到吸取位置。
     2. 根据 STAIR_HEIGHT_RELATION_MATRIX 的高低关系选择 1/2 抓取姿态。
     3. 吸取并保持 suction_hold_sec。
-    4. 执行 3 过渡态，再执行 4 存储态。
+    4. 阻塞执行 3 过渡态，再执行 4 存储态。
     5. 释放吸盘，再执行 0 态。
-    6. 倒退回当前 stair_id 的中心坐标，目标方向为 0。
+    6. 显式复位 KFS 相关通道；不再自动倒退回当前 stair_id 的中心坐标。
     """
     stair_id = int(stair_id)
     direction = int(direction)
@@ -756,52 +770,26 @@ def fetch_and_store_kfs(
         loop_interval_sec=loop_interval_sec,
     )
 
-    transition_pose_result = move_lib.control_kfs_pose(
-        sender=sender,
-        pose_id=3,
-        suction_ch4=KFS_SUCTION_ON_VALUE,
-        **({} if transition_pose_hold_sec is None else {"hold_sec": transition_pose_hold_sec}),
-    )
-    store_pose_result = move_lib.control_kfs_pose(
-        sender=sender,
-        pose_id=4,
-        suction_ch4=KFS_SUCTION_ON_VALUE,
-        **({} if store_pose_hold_sec is None else {"hold_sec": store_pose_hold_sec}),
-    )
-
-    release_result = set_kfs_suction(
-        sender=sender,
-        suction_on=False,
-        pose_id=4,
-        loop_interval_sec=loop_interval_sec,
-    )
-    zero_pose_result = move_lib.control_kfs_pose(
-        sender=sender,
-        pose_id=0,
-        suction_ch4=KFS_SUCTION_OFF_VALUE,
-    )
-
-    return_move_result = move_backward_to_des(
-        sender=sender,
-        position_runtime=position_runtime,
-        odom_runtime=odom_runtime,
-        x=stair_x,
-        y=stair_y,
-        target_deg=final_target_yaw_deg,
-        v=move_speed,
-    )
     reset_kfs_channels = move_lib.set_channel_values(
         sender,
         channel_values={
-            KFS_SUCTION_CHANNEL_INDEX: KFS_SUCTION_OFF_VALUE,
+            KFS_SUCTION_CHANNEL_INDEX: KFS_SUCTION_ON_VALUE,
             KFS_MODE_CHANNEL_INDEX: tools.SAFE_SWITCH_VALUE,
             KFS_POSE_CHANNEL_INDEX: tools.SAFE_SWITCH_VALUE,
             KFS_TRIGGER_CHANNEL_INDEX: tools.SAFE_SWITCH_VALUE,
         },
     )
+    post_suction_thread = start_kfs_post_suction_thread(
+        sender=sender,
+        transition_pose_hold_sec=transition_pose_hold_sec,
+        store_pose_hold_sec=store_pose_hold_sec,
+        loop_interval_sec=loop_interval_sec,
+        reset_kfs_channels=True,
+    )
 
     return {
-        "completed": return_move_result is not None,
+        "completed": True,
+        "post_suction_async": True,
         "stair_id": int(stair_id),
         "direction": int(direction),
         "height_relation": int(height_relation),
@@ -813,12 +801,221 @@ def fetch_and_store_kfs(
         "grab_pose_result": grab_pose_result,
         "suction_result": suction_result,
         "suction_hold_result": suction_hold_result,
-        "transition_pose_result": transition_pose_result,
-        "store_pose_result": store_pose_result,
-        "release_result": release_result,
-        "zero_pose_result": zero_pose_result,
-        "return_move_result": return_move_result,
+        "post_suction_thread": post_suction_thread,
+        "transition_pose_result": None,
+        "store_pose_result": None,
+        "release_result": None,
+        "zero_pose_result": None,
+        "return_to_center_skipped": True,
+        "return_move_result": None,
         "reset_kfs_channels": reset_kfs_channels,
+    }
+
+
+def start_kfs_post_suction_thread(
+    sender,
+    transition_pose_hold_sec=None,
+    store_pose_hold_sec=None,
+    loop_interval_sec=0.02,
+    reset_kfs_channels=True,
+    thread_name="kfs_post_suction_thread",
+):
+    """
+    启动 KFS 吸取保持完成后的异步后续线程。
+
+    默认只执行机械臂/吸盘后续：
+    1. pose_id=3 过渡态，保持 ch4=3。
+    2. pose_id=4 存储态，保持 ch4=3。
+    3. ch4: 3 -> 1 释放吸盘。
+    4. pose_id=0 回 0 态。
+    5. 可选复位 ch4/ch5/ch6/ch7。
+
+    注意：本线程只管理 KFS 机械臂/吸盘相关通道，不执行回退到台阶中心。
+    回中心是底盘动作，应由主流程在线程启动后同步执行，避免线程和主任务
+    并发写 ch0/ch2/des_yaw_i16。
+    """
+    result = {
+        "completed": False,
+        "running": True,
+        "reset_kfs_channels": bool(reset_kfs_channels),
+    }
+    done_event = threading.Event()
+    transition_wait_sec = 3.0 if transition_pose_hold_sec is None else float(transition_pose_hold_sec)
+    store_wait_sec = 1.5 if store_pose_hold_sec is None else float(store_pose_hold_sec)
+
+    def repeat_set_channel_values(channel_values, duration_sec):
+        deadline = time.time() + float(duration_sec)
+        channels = None
+        while time.time() < deadline:
+            channels = move_lib.set_channel_values(sender, channel_values=channel_values)
+            time.sleep(float(loop_interval_sec))
+        return move_lib.set_channel_values(sender, channel_values=channel_values)
+
+    def trigger_kfs_pose_with_lock(pose_id, arm_sec, fire_sec, suction_ch4):
+        pose_id = int(pose_id)
+        with tools.AUTO_TRIGGER_LOCK:
+            arm_channel_values = {
+                KFS_SUCTION_CHANNEL_INDEX: int(suction_ch4),
+                KFS_MODE_CHANNEL_INDEX: KFS_MODE_VALUE,
+                KFS_POSE_CHANNEL_INDEX: pose_id,
+                KFS_TRIGGER_CHANNEL_INDEX: KFS_TRIGGER_IDLE_VALUE,
+            }
+            arm_channels = repeat_set_channel_values(arm_channel_values, arm_sec)
+
+            fire_channel_values = {
+                KFS_SUCTION_CHANNEL_INDEX: int(suction_ch4),
+                KFS_MODE_CHANNEL_INDEX: KFS_MODE_VALUE,
+                KFS_POSE_CHANNEL_INDEX: pose_id,
+                KFS_TRIGGER_CHANNEL_INDEX: 3,
+            }
+            fire_channels = repeat_set_channel_values(fire_channel_values, fire_sec)
+
+            idle_channel_values = {
+                KFS_SUCTION_CHANNEL_INDEX: int(suction_ch4),
+                KFS_MODE_CHANNEL_INDEX: tools.SAFE_SWITCH_VALUE,
+                KFS_POSE_CHANNEL_INDEX: tools.SAFE_SWITCH_VALUE,
+                KFS_TRIGGER_CHANNEL_INDEX: tools.SAFE_SWITCH_VALUE,
+            }
+            idle_channels = move_lib.set_channel_values(sender, channel_values=idle_channel_values)
+
+        return {
+            "pose_id": pose_id,
+            "arm_channels": arm_channels,
+            "fire_channels": fire_channels,
+            "idle_channels": idle_channels,
+            "arm_sec": float(arm_sec),
+            "fire_sec": float(fire_sec),
+            "suction_ch4": int(suction_ch4),
+            "completed": True,
+        }
+
+    def release_kfs_suction_with_lock(edge_arm_sec=0.1, edge_hold_sec=0.5):
+        with tools.AUTO_TRIGGER_LOCK:
+            arm_channels = repeat_set_channel_values(
+                {
+                    KFS_SUCTION_CHANNEL_INDEX: KFS_SUCTION_ON_VALUE,
+                    KFS_MODE_CHANNEL_INDEX: KFS_MODE_VALUE,
+                },
+                edge_arm_sec,
+            )
+            fire_channels = repeat_set_channel_values(
+                {
+                    KFS_SUCTION_CHANNEL_INDEX: KFS_SUCTION_OFF_VALUE,
+                    KFS_MODE_CHANNEL_INDEX: KFS_MODE_VALUE,
+                },
+                edge_hold_sec,
+            )
+            idle_channel_values = {
+                KFS_SUCTION_CHANNEL_INDEX: KFS_SUCTION_OFF_VALUE,
+                KFS_MODE_CHANNEL_INDEX: tools.SAFE_SWITCH_VALUE,
+                KFS_POSE_CHANNEL_INDEX: tools.SAFE_SWITCH_VALUE,
+                KFS_TRIGGER_CHANNEL_INDEX: tools.SAFE_SWITCH_VALUE,
+            }
+            idle_channels = move_lib.set_channel_values(sender, channel_values=idle_channel_values)
+        return {
+            "suction_on": False,
+            "arm_channels": arm_channels,
+            "fire_channels": fire_channels,
+            "idle_channels": idle_channels,
+            "edge_arm_sec": float(edge_arm_sec),
+            "edge_hold_sec": float(edge_hold_sec),
+            "ch4_only": False,
+            "completed": True,
+        }
+
+    def trigger_kfs_zero_return_with_lock(return_sec=0.1):
+        with tools.AUTO_TRIGGER_LOCK:
+            zero_channel_values = {
+                KFS_SUCTION_CHANNEL_INDEX: KFS_SUCTION_OFF_VALUE,
+                KFS_MODE_CHANNEL_INDEX: KFS_MODE_VALUE,
+                KFS_POSE_CHANNEL_INDEX: 0,
+                KFS_TRIGGER_CHANNEL_INDEX: 0,
+            }
+            zero_channels = repeat_set_channel_values(zero_channel_values, return_sec)
+            idle_channel_values = {
+                KFS_SUCTION_CHANNEL_INDEX: KFS_SUCTION_OFF_VALUE,
+                KFS_MODE_CHANNEL_INDEX: tools.SAFE_SWITCH_VALUE,
+                KFS_POSE_CHANNEL_INDEX: tools.SAFE_SWITCH_VALUE,
+                KFS_TRIGGER_CHANNEL_INDEX: tools.SAFE_SWITCH_VALUE,
+            }
+            idle_channels = move_lib.set_channel_values(sender, channel_values=idle_channel_values)
+
+        return {
+            "pose_id": 0,
+            "pose_name": "zero_return",
+            "channels": zero_channels,
+            "idle_channels": idle_channels,
+            "return_sec": float(return_sec),
+            "completed": True,
+        }
+
+    def worker():
+        try:
+            transition_pose_result = trigger_kfs_pose_with_lock(
+                pose_id=3,
+                arm_sec=0.1,
+                fire_sec=0.3,
+                suction_ch4=KFS_SUCTION_ON_VALUE,
+            )
+            time.sleep(transition_wait_sec)
+
+            store_pose_result = trigger_kfs_pose_with_lock(
+                pose_id=4,
+                arm_sec=0.1,
+                fire_sec=0.4,
+                suction_ch4=KFS_SUCTION_ON_VALUE,
+            )
+            time.sleep(store_wait_sec)
+
+            release_result = release_kfs_suction_with_lock()
+            time.sleep(2.0)
+
+            zero_pose_result = trigger_kfs_zero_return_with_lock(return_sec=0.1)
+
+            reset_channels = None
+            if reset_kfs_channels:
+                reset_channels = move_lib.set_channel_values(
+                    sender,
+                    channel_values={
+                        KFS_SUCTION_CHANNEL_INDEX: KFS_SUCTION_OFF_VALUE,
+                        KFS_MODE_CHANNEL_INDEX: tools.SAFE_SWITCH_VALUE,
+                        KFS_POSE_CHANNEL_INDEX: tools.SAFE_SWITCH_VALUE,
+                        KFS_TRIGGER_CHANNEL_INDEX: tools.SAFE_SWITCH_VALUE,
+                    },
+                )
+
+            result.update({
+                "completed": True,
+                "running": False,
+                "transition_pose_result": transition_pose_result,
+                "store_pose_result": store_pose_result,
+                "release_result": release_result,
+                "zero_pose_result": zero_pose_result,
+                "reset_kfs_channels": reset_channels,
+                "transition_wait_sec": float(transition_wait_sec),
+                "store_wait_sec": float(store_wait_sec),
+                "release_wait_sec": 2.0,
+            })
+        except Exception as exc:
+            result.update({
+                "completed": False,
+                "running": False,
+                "exception": repr(exc),
+            })
+        finally:
+            done_event.set()
+
+    thread = threading.Thread(
+        target=worker,
+        daemon=True,
+        name=str(thread_name),
+    )
+    result["thread_name"] = thread.name
+    thread.start()
+    return {
+        "thread": thread,
+        "done_event": done_event,
+        "result": result,
     }
 
 
@@ -827,13 +1024,14 @@ def fetch_weapon(
     position_runtime,
     odom_runtime,
     weapon_id,
-    v=600,
+    v=300,
     final_target_yaw_deg=90.0,
     weapon_mode_settle_sec=0.3,
     grab_arm_sec=0.3,
     grab_hold_sec=1.0,
     lift_hold_sec=1.0,
     first_rotate_yaw_deg=90.0,
+    weapon_approach_offset_y=2.0,
     intermediate_move_yaw_deg=90.0,
     intermediate_move_x=-2.4,
     intermediate_move_y=-1.2,
@@ -845,7 +1043,7 @@ def fetch_weapon(
     release_edge_hold_sec=0.3,
 ):
     """
-    根据 weapon_id 选择目标点，移动 weapon/夹爪到目标点后执行夹取并抬起。
+    根据 weapon_id 选择目标点，先移动 weapon/夹爪到目标点前方，再到目标点后执行夹取并抬起。
 
     weapon_id 对应目标点从当前 position 后端的 WEAPON_TARGETS 读取。
     """
@@ -862,7 +1060,39 @@ def fetch_weapon(
     des_weapon = weapon_targets[weapon_id]
     des_x, des_y = des_weapon
 
-    # 第一段：用 weapon/夹爪参考点，以 90deg 固定航向移动到对应 weapon 目标点。
+    approach_x = float(des_x)
+    approach_y = float(des_y) - float(weapon_approach_offset_y)
+
+    # 第一段：用 weapon/夹爪参考点，以 90deg 固定航向先移动到 weapon 目标点前方。
+    approach_move_result = move_lib.move_to_target(
+        sender=sender,
+        position_runtime=position_runtime,
+        odom_runtime=odom_runtime,
+        target_x=approach_x,
+        target_y=approach_y,
+        final_target_yaw_deg=first_rotate_yaw_deg,
+        cruise_forward_cmd=v,
+        reference="weapon",
+    )
+    if approach_move_result is None or approach_move_result.get("timed_out"):
+        return {
+            "completed": False,
+            "failed_step": "weapon_approach_move",
+            "weapon_id": int(weapon_id),
+            "des_weapon": {
+                "x": float(des_x),
+                "y": float(des_y),
+            },
+            "weapon_approach_target": {
+                "x": float(approach_x),
+                "y": float(approach_y),
+                "yaw_deg": float(first_rotate_yaw_deg),
+                "offset_y": float(weapon_approach_offset_y),
+            },
+            "approach_move_result": approach_move_result,
+        }
+
+    # 第二段：继续用 weapon/夹爪参考点，以 90deg 固定航向移动到对应 weapon 目标点。
     move_result = move_lib.move_to_target(
         sender=sender,
         position_runtime=position_runtime,
@@ -873,6 +1103,48 @@ def fetch_weapon(
         cruise_forward_cmd=v,
         reference="weapon",
     )
+    if move_result is None or move_result.get("timed_out"):
+        return {
+            "completed": False,
+            "failed_step": "weapon_target_move",
+            "weapon_id": int(weapon_id),
+            "des_weapon": {
+                "x": float(des_x),
+                "y": float(des_y),
+            },
+            "weapon_approach_target": {
+                "x": float(approach_x),
+                "y": float(approach_y),
+                "yaw_deg": float(first_rotate_yaw_deg),
+                "offset_y": float(weapon_approach_offset_y),
+            },
+            "approach_move_result": approach_move_result,
+            "move_result": move_result,
+        }
+
+    def enter_weapon_mode(duration_sec=weapon_mode_settle_sec, loop_interval_sec=0.02):
+        channel_values = {
+            1: 0,
+            2: 0,
+            4: 1,
+            5: 3,
+            6: tools.SAFE_SWITCH_VALUE,
+            7: tools.SAFE_SWITCH_VALUE,
+        }
+        deadline = time.time() + float(duration_sec)
+        while time.time() < deadline:
+            channels = move_lib.set_channel_values(
+                sender,
+                des_yaw_i16=0,
+                channel_values=channel_values,
+            )
+            time.sleep(float(loop_interval_sec))
+        channels = move_lib.set_channel_values(
+            sender,
+            des_yaw_i16=0,
+            channel_values=channel_values,
+        )
+        return channels
 
     def set_weapon_state(ch1=0, ch4=1, forward_cmd=0, des_yaw_i16=0):
         return move_lib.set_channel_values(
@@ -883,11 +1155,12 @@ def fetch_weapon(
                 2: int(forward_cmd),
                 4: int(ch4),
                 5: 3,
+                6: tools.SAFE_SWITCH_VALUE,
+                7: tools.SAFE_SWITCH_VALUE,
             },
         )
 
-    mode_channels = set_weapon_state(ch1=0, ch4=1)
-    time.sleep(float(weapon_mode_settle_sec))
+    mode_channels = enter_weapon_mode()
 
     grab_arm_channels = set_weapon_state(ch1=0, ch4=1)
     time.sleep(float(grab_arm_sec))
@@ -935,6 +1208,13 @@ def fetch_weapon(
             "x": float(des_x),
             "y": float(des_y),
         },
+        "weapon_approach_target": {
+            "x": float(approach_x),
+            "y": float(approach_y),
+            "yaw_deg": float(first_rotate_yaw_deg),
+            "offset_y": float(weapon_approach_offset_y),
+        },
+        "approach_move_result": approach_move_result,
         "move_result": move_result,
         "grab_result": {
             "mode_channels": mode_channels,
@@ -986,25 +1266,22 @@ def climb(
     """
     组合式上楼梯动作：
     1. direction1/direction2 转成 des_deg1/des_deg2
-    2. 原地旋转到 des_deg1
-    3. ch2=pre_climb_forward_cmd 前进 pre_climb_duration_sec
-    4. 调用 move.climb(...) 阻塞执行半自动上楼梯
-    5. 调用 move_to_des(...) 移动到目标点 (x, y)，最终朝向 des_deg2
+    2. 调用高位微调逻辑完成上楼前对正和前探
+    3. 调用 move.climb(...) 阻塞执行半自动上楼梯
+    4. 调用 move_to_des(...) 移动到目标点 (x, y)，最终朝向 des_deg2
     """
     des_deg1 = tools.direction_int_to_yaw_deg(direction1)
     des_deg2 = tools.direction_int_to_yaw_deg(direction2)
 
-    rotate_result = move_lib.rotate_to_target_yaw_segmented(
+    pre_climb_adjust_result = adjust_position(
         sender=sender,
         position_runtime=position_runtime,
-        target_yaw_deg=des_deg1,
-    )
-
-    pre_climb_drive_result = move_lib.drive_with_channels_for_duration(
-        sender=sender,
-        duration_sec=pre_climb_duration_sec,
-        forward_cmd=int(pre_climb_forward_cmd),
-        target_yaw_deg=des_deg1,
+        odom_runtime=odom_runtime,
+        move_type=1,
+        direction=direction1,
+        stair_id=-1,
+        height_relation=1,
+        move_speed=move_speed,
     )
 
     climb_result = move_lib.climb(
@@ -1019,14 +1296,15 @@ def climb(
         x=x,
         y=y,
         target_deg=des_deg2,
-        v=move_speed,
+        v=STAIR_MOVE_MAX_CMD,
     )
 
     return {
         "des_deg1": float(des_deg1),
         "des_deg2": float(des_deg2),
-        "rotate_result": rotate_result,
-        "pre_climb_drive_result": pre_climb_drive_result,
+        "rotate_result": pre_climb_adjust_result.get("rotate_result"),
+        "pre_climb_adjust_result": pre_climb_adjust_result,
+        "pre_climb_drive_result": pre_climb_adjust_result.get("drive_result"),
         "climb_result": climb_result,
         "move_result": move_result,
     }
@@ -1044,7 +1322,7 @@ def descend(
     des_y,
     adjust_distance=PRE_DESCEND_ADJUST_DISTANCE,
     trigger_arm_sec=0.1,
-    trigger_hold_sec=2.0,
+    trigger_hold_sec=0.3,
     loop_interval_sec=0.02,
     move_speed=600,
     timeout_sec=None,
@@ -1112,7 +1390,7 @@ def descend(
         x=des_x,
         y=des_y,
         target_deg=des_deg2,
-        v=move_speed,
+        v=STAIR_MOVE_MAX_CMD,
         total_timeout_sec=move_timeout_sec,
     )
     if move_result is None:
@@ -1277,12 +1555,48 @@ def _action_value_to_int(value, column_name):
     return int_value
 
 
+def _action_matrix_to_rows(action_matrix):
+    if hasattr(action_matrix, "tolist"):
+        action_matrix = action_matrix.tolist()
+
+    try:
+        rows = list(action_matrix)
+    except TypeError:
+        print(f"{execute_action_matrix.__name__}输入错误: action_matrix 必须是 n*5 数据")
+        sys.exit(1)
+
+    if not rows:
+        return []
+
+    if len(rows) == ACTION_MATRIX_ROW_SIZE and not isinstance(rows[0], (list, tuple)):
+        rows = [rows]
+
+    normalized_rows = []
+    for row_index, row in enumerate(rows):
+        if hasattr(row, "tolist"):
+            row = row.tolist()
+        try:
+            row_values = list(row)
+        except TypeError:
+            print(
+                f"{execute_action_matrix.__name__}输入错误: "
+                f"第 {row_index} 行不是一行5列数据"
+            )
+            sys.exit(1)
+        normalized_rows.append(row_values)
+
+    return normalized_rows
+
+
 def execute_action_row(
     sender,
     position_runtime,
     odom_runtime,
     action_row,
     final_direction=1,
+    next_from_pose=0,
+    next_to_pose=0,
+    next_height_action=0,
 ):
     """
     解释并执行动作矩阵中的一行。
@@ -1296,10 +1610,19 @@ def execute_action_row(
         for index, value in enumerate(row_values)
     ]
     final_direction = _action_value_to_int(final_direction, "final_direction")
+    next_from_pose = _action_value_to_int(next_from_pose, "next_from_pose")
+    next_to_pose = _action_value_to_int(next_to_pose, "next_to_pose")
+    next_height_action = _action_value_to_int(next_height_action, "next_height_action")
     if final_direction not in (1, 2, 3, 4):
         print(
             f"{execute_action_row.__name__}输入错误: "
             f"final_direction={final_direction}, 必须是 1/2/3/4"
+        )
+        sys.exit(1)
+    if next_height_action not in (0, 1):
+        print(
+            f"{execute_action_row.__name__}输入错误: "
+            f"next_height_action={next_height_action}, 必须是 0/1"
         )
         sys.exit(1)
 
@@ -1351,6 +1674,9 @@ def execute_action_row(
         "height_action": int(height_action),
         "grab_action": int(grab_action),
         "final_direction": int(final_direction),
+        "next_from_pose": int(next_from_pose),
+        "next_to_pose": int(next_to_pose),
+        "next_height_action": int(next_height_action),
         "inferred_direction": int(inferred_direction),
         "height_relation": int(height_relation),
     }
@@ -1374,6 +1700,58 @@ def execute_action_row(
             )
             result["branch"] = "directional"
             result["fetch_result"] = fetch_result
+            result["return_center_result"] = None
+            result["return_center_skipped"] = True
+            result["return_center_skip_reason"] = "fetch_failed"
+            if not fetch_result.get("completed", False):
+                result["implemented"] = True
+                return result
+
+            next_inferred_direction = 0
+            next_height_relation = 0
+            should_skip_return_center = False
+            if next_height_action == 1:
+                next_inferred_direction = tools.stair_id_to_direction(
+                    next_from_pose,
+                    next_to_pose,
+                    exit_on_error=False,
+                )
+                if next_inferred_direction == 0:
+                    print(
+                        f"{execute_action_row.__name__}输入错误: "
+                        f"下一行 height_action=1 但 {next_from_pose} 与 {next_to_pose} 不相邻"
+                    )
+                    sys.exit(1)
+                next_height_relation = get_stair_height_relation(
+                    next_from_pose,
+                    next_inferred_direction,
+                )
+                should_skip_return_center = (
+                    next_height_relation == 1
+                    and to_pos == next_to_pose
+                )
+
+            result["next_inferred_direction"] = int(next_inferred_direction)
+            result["next_height_relation"] = int(next_height_relation)
+            if should_skip_return_center:
+                result["return_center_skip_reason"] = "next_climb_to_same_target"
+                result["implemented"] = True
+                return result
+
+            return_center_yaw_deg = tools.direction_int_to_yaw_deg(move_dir)
+            return_center_result = move_to_des(
+                sender=sender,
+                position_runtime=position_runtime,
+                odom_runtime=odom_runtime,
+                x=from_x,
+                y=from_y,
+                target_deg=return_center_yaw_deg,
+                v=STAIR_MOVE_MAX_CMD,
+            )
+            result["return_center_result"] = return_center_result
+            result["return_center_skipped"] = False
+            result["return_center_skip_reason"] = None
+            result["return_center_target_yaw_deg"] = float(return_center_yaw_deg)
             result["implemented"] = True
             return result
 
@@ -1404,3 +1782,75 @@ def execute_action_row(
     result["branch"] = "stationary"
     result["implemented"] = False
     return result
+
+
+def execute_action_matrix(
+    sender,
+    position_runtime,
+    odom_runtime,
+    action_matrix,
+    final_direction=1,
+    stop_on_unimplemented=True,
+):
+    """
+    顺序执行动作矩阵。
+
+    action_matrix: n*5，每行格式同 execute_action_row()。
+    final_direction: 每行完成后的最终朝向，当前统一传给每一行。
+    stop_on_unimplemented: 遇到 execute_action_row() 返回 implemented=False 时是否终止。
+    """
+    final_direction = _action_value_to_int(final_direction, "final_direction")
+    if final_direction not in (1, 2, 3, 4):
+        print(
+            f"{execute_action_matrix.__name__}输入错误: "
+            f"final_direction={final_direction}, 必须是 1/2/3/4"
+        )
+        sys.exit(1)
+
+    rows = _action_matrix_to_rows(action_matrix)
+    row_count = len(rows)
+    results = []
+    for row_index, action_row in enumerate(rows):
+        row_kwargs = {}
+        if row_index + 1 < row_count:
+            next_row_values = _action_row_to_list(rows[row_index + 1])
+            row_kwargs = {
+                "next_from_pose": _action_value_to_int(
+                    next_row_values[0],
+                    "next_from_pose",
+                ),
+                "next_to_pose": _action_value_to_int(
+                    next_row_values[1],
+                    "next_to_pose",
+                ),
+                "next_height_action": _action_value_to_int(
+                    next_row_values[3],
+                    "next_height_action",
+                ),
+            }
+
+        row_result = execute_action_row(
+            sender=sender,
+            position_runtime=position_runtime,
+            odom_runtime=odom_runtime,
+            action_row=action_row,
+            final_direction=final_direction,
+            **row_kwargs,
+        )
+        row_result["row_index"] = int(row_index)
+        results.append(row_result)
+
+        if stop_on_unimplemented and not row_result.get("implemented", False):
+            print(
+                f"{execute_action_matrix.__name__}输入错误: "
+                f"第 {row_index} 行尚未接入真实动作 "
+                f"action_row={row_result.get('action_row')}"
+            )
+            sys.exit(1)
+
+    return {
+        "completed": True,
+        "row_count": row_count,
+        "final_direction": int(final_direction),
+        "results": results,
+    }

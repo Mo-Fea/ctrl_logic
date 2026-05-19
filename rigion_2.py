@@ -3,13 +3,17 @@
 import math
 import time
 
-from lib2 import module, tools
+from lib2 import module, move, tools
 
 
 LIDAR_TYPE = 1
 ODOM_TOPIC = "/odin1/odometry_highfreq"
+
 WEAPON_ID = 1
-MOVE_SPEED = 300
+START_STAIR_ID = -1
+START_FIXED_YAW_DEG = 0.01
+MOVE_SPEED = 600
+FINAL_DIRECTION = 1
 HOLD_AFTER_DONE_SEC = 5.0
 
 WAIT_READY_TIMEOUT_SEC = 8.0
@@ -28,22 +32,17 @@ def wait_runtime_ready(position_runtime, odom_runtime):
 
     while time.time() < deadline:
         robot_pose = position_runtime.get_robot_pose()
-        weapon_pose = position_runtime.get_weapon_pose()
         update_time = position_runtime.get_latest_update_time()
         odometry = odom_runtime.get_odometry(max_age_sec=MAX_READY_DATA_AGE_SEC)
 
         data_finite = (
             robot_pose is not None
-            and weapon_pose is not None
             and odometry is not None
             and values_are_finite(
                 robot_pose["x"],
                 robot_pose["y"],
                 robot_pose["z"],
                 robot_pose["yaw"],
-                weapon_pose["x"],
-                weapon_pose["y"],
-                weapon_pose["z"],
                 odometry["linear_x"],
                 odometry["linear_y"],
                 odometry["angular_z"],
@@ -66,38 +65,6 @@ def wait_runtime_ready(position_runtime, odom_runtime):
     return False
 
 
-def print_weapon_debug(position_runtime, weapon_id):
-    position_lib = module.get_position_lib()
-    weapon_targets = getattr(position_lib, "WEAPON_TARGETS", {})
-    target = weapon_targets.get(int(weapon_id))
-    weapon_pose = position_runtime.get_weapon_pose()
-    robot_pose = position_runtime.get_robot_pose()
-
-    print(f"weapon target[{weapon_id}] = {target}")
-    if robot_pose is not None:
-        print(
-            "robot_pose: "
-            f"x={float(robot_pose['x']):.3f}, "
-            f"y={float(robot_pose['y']):.3f}, "
-            f"z={float(robot_pose['z']):.3f}, "
-            f"yaw={math.degrees(float(robot_pose['yaw'])):.2f}deg"
-        )
-    if weapon_pose is not None:
-        print(
-            "weapon_pose: "
-            f"x={float(weapon_pose['x']):.3f}, "
-            f"y={float(weapon_pose['y']):.3f}, "
-            f"z={float(weapon_pose['z']):.3f}"
-        )
-    if target is not None and weapon_pose is not None:
-        dx = float(target[0]) - float(weapon_pose["x"])
-        dy = float(target[1]) - float(weapon_pose["y"])
-        print(
-            "weapon distance to target: "
-            f"dx={dx:.3f}, dy={dy:.3f}, dist={math.hypot(dx, dy):.3f}m"
-        )
-
-
 def main():
     sender = None
     flag_node = None
@@ -107,21 +74,19 @@ def main():
     odom_runtime = None
 
     try:
-        print(f"Starting fetch_weapon test, weapon_id={WEAPON_ID}, speed={MOVE_SPEED}...")
+        print("Starting region 2 full challenge test...")
         sender, _, flag_node, flag_thread, flag_stop_event = module.init(
             lidar_type=LIDAR_TYPE
         )
         position_runtime = module.start_position_thread(sender)
         odom_runtime = module.start_odometry_thread(topic=ODOM_TOPIC)
 
-        print("Waiting for robot/weapon pose and odometry...")
+        print("Waiting for robot pose and odometry...")
         if not wait_runtime_ready(position_runtime, odom_runtime):
-            print("fetch_weapon test failed: runtime data not ready.")
+            print("Region 2 test failed: runtime data not ready.")
             return
 
-        print_weapon_debug(position_runtime, WEAPON_ID)
-
-        print(f"Executing module.fetch_weapon(weapon_id={WEAPON_ID})...")
+        print(f"Fetching weapon {WEAPON_ID}...")
         weapon_result = module.fetch_weapon(
             sender=sender,
             position_runtime=position_runtime,
@@ -129,17 +94,49 @@ def main():
             weapon_id=WEAPON_ID,
             v=MOVE_SPEED,
         )
-        print("fetch_weapon returned:")
+        print("fetch_weapon finished.")
         print(weapon_result)
-        print_weapon_debug(position_runtime, WEAPON_ID)
 
-        if not weapon_result or not weapon_result.get("grab_result", {}).get("completed", False):
-            print("fetch_weapon test failed before grab completed.")
+        print("Resetting weapon state...")
+        reset_weapon_result = move.reset_weapon_after_fetch(sender)
+        print("weapon reset finished.")
+        print(reset_weapon_result)
+
+        start_x, start_y = module.get_stair_xy(START_STAIR_ID)
+        print(
+            f"Moving to stair {START_STAIR_ID} "
+            f"({start_x:.3f}, {start_y:.3f}) "
+            f"with fixed_yaw={START_FIXED_YAW_DEG:.2f} deg..."
+        )
+        start_move_result = module.move_to_des(
+            sender=sender,
+            position_runtime=position_runtime,
+            odom_runtime=odom_runtime,
+            x=start_x,
+            y=start_y,
+            target_deg=START_FIXED_YAW_DEG,
+            v=MOVE_SPEED,
+        )
+        if start_move_result is None:
+            print("Region 2 test failed: move to start stair failed.")
             return
+        print("Move to start stair finished.")
+        print(start_move_result)
+
+        print("Executing CHALLENGE_ACTION_MATRIX...")
+        matrix_result = module.execute_action_matrix(
+            sender=sender,
+            position_runtime=position_runtime,
+            odom_runtime=odom_runtime,
+            action_matrix=module.CHALLENGE_ACTION_MATRIX,
+            final_direction=FINAL_DIRECTION,
+        )
+        print("Challenge action matrix finished.")
+        print(matrix_result)
 
         print(f"Holding current output for {HOLD_AFTER_DONE_SEC:.1f}s before shutdown...")
         time.sleep(HOLD_AFTER_DONE_SEC)
-        print("fetch_weapon test completed.")
+        print("Region 2 full challenge test completed.")
 
     except KeyboardInterrupt:
         print("\nStopped by user.")

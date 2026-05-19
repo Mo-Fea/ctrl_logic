@@ -3,11 +3,11 @@
 
 # ws_r2 当前工程进度
 
-本目录是 R2_H 上位机控制工程。当前主线使用 `lib2/`，旧 `lib/` 基本只作参考。`R2_H-main/` 是下位机 STM32/W5500 工程，已阅读并把当前通信协议总结在本文中，后续窗口优先看本文即可，不需要重新通读单片机工程。
+本目录是 R2_H 上位机控制工程。当前主线使用 `lib2/`，旧 `lib/` 基本只作参考。当前通信协议已总结在本文中，后续窗口优先看本文即可。
 
 ## 当前主线文件
 
-- `lib2/tools.py`：TCP 连接、V2 控制帧打包、后台持续发送 `frame_thread`、重定位监听、统一清理。
+- `lib2/tools.py`：TCP 连接、V2 控制帧打包、后台持续发送 `frame_thread`、重定位监听、统一清理；提供 `AUTO_TRIGGER_LOCK`，用于保护 KFS/上下楼等模式触发上升沿。
 - `lib2/position_backend.py`：位姿后端选择，`1=odin`，`2=mid360`；当前坐标配置跟随后端切换。
 - `lib2/position_odin.py`：odin 后端，基于 `/tf`；维护 odin 对应的梅林入口、入口前点、weapon 目标点和外参。
 - `lib2/position_mid360.py`：mid360 后端，基于 `/lio/robo/odom` 和 `/lio/odom`；维护 mid360 对应的梅林入口、入口前点、weapon 目标点和外参。
@@ -22,15 +22,17 @@
 主要入口：
 
 - `level_2.py`：mid360 移动到点测试，目标 `(2.0, -2.0)`，到点后不最终旋转。
-- `catch.py`：当前是 odin KFS 抓取调试脚本；先按 vector PID waypoint 跑一圈，再移动到 `-1`，最后执行 `-1 -> 2` 高位 KFS 抓取。
+- `catch.py`：当前是 odin `fetch_weapon(weapon_id=1)` 调试脚本；会等待 robot/weapon pose 和 odom 后执行完整 weapon 抓取流程，测试速度 `MOVE_SPEED=300`。
 - `move_test.py`：实验性 vector PID 到点测试，固定目标航向，用距离 PID 算速度标量，再按目标向量实时分配 `ch0/ch2`；当前按 waypoint 顺序跑 `(-0.8, -4.8) -> (-1.0, 0.0) -> (-2.4, -2.4)`。
 - `move_t.py`：主线 `module.move_to_des()` 单点移动测试，目标 `(-0.8, -4.8)`，持续打印通道、yaw、当前位置、目标距离和 odom。
 - `rotation_move.py`：带输入保持点的旋转位置保持测试，保持点 `(-0.8, -4.8)`，目标 yaw `180deg`，持续打印通道、yaw、位置误差和 odom。
 - `ori_rot.py`：原地循环旋转测试，循环 `0.01 -> 90 -> 180 -> -90 -> 0.01`，使用当前坐标作为保持点并持续打印通道状态。
-- `fwd.py`：直连下位机简单前进测试，按新 `frame_thread + move.set_motion_channels()` 接口持续发送 `ch2`。
+- `fwd.py`：直连控制器简单前进测试，按新 `frame_thread + move.set_motion_channels()` 接口持续发送 `ch2`。
 - `up_down_test.py`：odin 上下台阶测试；当前最后一段已从下楼梯替换为 `1 -> 2` 的 KFS 抓取。
-- `suck.py`：直连下位机 KFS 高位吸取/存储调试脚本，不等待定位，用于单独观察 KFS 通道时序。
-- `rigion_1.py`：区域 1 任务测试脚本；抓取 1 号 weapon，移动到 `-1`，再执行 `-1 -> 2`、`2 -> 1`、`1 -> 4` 上下楼。
+- `suck.py`：直连控制器 KFS 高位吸取/存储调试脚本，不等待定位，用于单独观察 KFS 通道时序。
+- `rigion_1.py`：区域 1 简化矩阵测试脚本；初始化后移动到 `-1`，再直接执行 `module.CHALLENGE_ACTION_MATRIX`，不执行 weapon 抓取。
+- `rigion_2.py`：区域 1 完整矩阵测试脚本；初始化后先 `fetch_weapon(weapon_id=1)`，执行 `move.reset_weapon_after_fetch()`，再移动到 `-1` 并执行 `module.CHALLENGE_ACTION_MATRIX`。
+- `descend.py`：上下楼/KFS 小闭环测试脚本；移动到 `-1`，执行 `-1 -> 2` 上楼，随后执行 `2 -> 5` KFS 抓取，再执行 `2 -> -1` 下楼。
 - `level_move.py`：用 `ch0` 横移到点的测试入口。
 - `rotation.py`：单独测试目标航向发送。
 
@@ -44,8 +46,11 @@
 - 主线应优先使用 `sender.set_channel_values(...)` 或 `move.set_channel_values(...)` 只修改本动作负责的通道；移动/旋转类可用 `move.set_motion_channels(...)` 修改 `ch0/ch2/ch3/des_yaw_i16`。不要恢复旧的 `set_channels_and_des_yaw_i16(...)` 整帧覆盖方式。
 - 现在没有自动安全复位；动作结束后哪些通道需要复位必须由动作边界显式管理。当前任务就是通道构建逻辑修改后的动作逻辑勘误，重点检查各组合动作完成后的最终通道状态。
 - KFS 吸取后再执行机械臂姿态时，必须保持 `ch4=3`，否则会产生 `3->1` 下降沿导致释放；当前通过 `move.control_kfs_pose(..., suction_ch4=3)` 保持。
-- 修改通道逻辑时优先对照本文“最新通信协议”和 `R2_H-main/Core/Src/freertos.c` 的当前逻辑。
+- KFS 姿态、KFS 吸盘释放、KFS 回 0、上楼和下楼的“模式设置 + 触发边沿”必须使用 `tools.AUTO_TRIGGER_LOCK` 保护。锁只覆盖 arm/fire/reset 触发临界区；触发后等待自动任务完成的阶段不持锁。
+- 修改通道逻辑时优先对照本文“最新通信协议”。
 - 当前工作目录未必保留 `.git` 元数据；无论是否在 git 仓库中，工作中都要谨慎对待已有文件改动，不要回退无关内容。
+- 要注意用户提出需求的执行逻辑，如果有问题请务必指出，待用户确认无误或者需要修正之后再作修改。
+- 注意：主要阅读lib2内文件以及utils内文件，其他文件，除非用户指定该文件，即便在本文件内有提及或讲解，也不需要阅读或纳入思考。
 
 ## 位姿后端与坐标配置
 
@@ -103,7 +108,7 @@ module.get_stair_matrix()
 
 ## 最新通信协议
 
-下位机 W5500 当前工作在 TCP Server：
+控制器当前工作在 TCP Server：
 
 ```text
 IP:   192.168.2.199
@@ -111,7 +116,7 @@ Port: 5000
 Mode: TCP Server
 ```
 
-上位机需要持续发送控制帧，当前推荐 70Hz 左右。下位机存在 NET 超时保护：
+上位机需要持续发送控制帧，当前推荐 70Hz 左右。控制器存在网络控制超时保护：
 
 ```text
 RC_NET_TIMEOUT_MS = 240ms
@@ -141,11 +146,11 @@ init = 0xFFFF
 范围 = payload_len + frame_type + payload，即 bytes[2:30]
 ```
 
-下位机也兼容旧帧，但上位机主线应继续使用 V2：`seq + ch[10] + yaw_raw_cdeg + target_yaw_cdeg`。
+控制器也兼容旧帧，但上位机主线应继续使用 V2：`seq + ch[10] + yaw_raw_cdeg + target_yaw_cdeg`。
 
 ### 通道映射
 
-下位机对网口通道做了二次映射：
+控制器对网口通道做了二次映射：
 
 - `ch0~ch3`：clamp 到 `-992~992`，再做 20 死区。
 - `ch4`：二段开关，只保留 `1/3`，非 `3` 会映射成 `1`。
@@ -327,7 +332,7 @@ ch5=2, ch4=3 触发夹紧 PF3
 ch5=2, ch4=1
 ```
 
-当前没有应用层 ACK，也没有上位机可读状态回传；执行自动姿态后只能按时间等待或现场观察。后续如需要严谨闭环，应增加下位机状态回传。
+当前没有应用层 ACK，也没有上位机可读状态回传；执行自动姿态后只能按时间等待或现场观察。后续如需要严谨闭环，应增加控制器状态回传。
 
 ### 航向控制字段
 
@@ -344,7 +349,7 @@ ch5=2, ch4=1
 target_yaw_cdeg = 0 表示关闭航向 PID
 ```
 
-如果真实目标是 `0°`，上位机应使用 `move.encode_target_yaw_i16(0.0)`，它会编码成 `1`，避免下位机当作关闭 PID。
+如果真实目标是 `0°`，上位机应使用 `move.encode_target_yaw_i16(0.0)`，它会编码成 `1`，避免控制器当作关闭 PID。
 
 ## 位姿后端
 
@@ -368,14 +373,14 @@ mid360 当前逻辑：
 `module.init()` 当前是阻塞式初始化：
 
 1. 设置位姿后端。
-2. TCP 连接下位机。
+2. TCP 连接控制器。
 3. 启动 `/odin1/flag1` 重定位监听。
 4. 默认等待重定位成功。
 5. 默认销毁重定位监听。
 6. 创建并启动 `frame_thread`。
 7. 等待首帧 TCP `sendall()` 成功后返回。
 
-注意：首帧发送成功只能证明 TCP 层发送成功，不能证明下位机业务层已经执行。
+注意：首帧发送成功只能证明 TCP 层发送成功，不能证明控制器业务层已经执行。
 
 ## 移动逻辑
 
@@ -436,14 +441,14 @@ DEFAULT_STOP_DISTANCE = 0.02m
 2. 如果 des_x/des_y 非 0，使用输入坐标作为保持点。
 3. 每轮持续发送目标 yaw，同时用当前位置到保持点的误差计算 ch0/ch2 做位置保持。
 4. 不再因为 yaw 误差大而停 ch0/ch2；底盘 yaw PID 只由 des_yaw_i16 影响。
-5. 退出条件：yaw 到目标角阈值内，且当前位置距离保持点不超过 position_tolerance。
+5. 退出条件：`des_x/des_y` 都为 `0` 时只要求 yaw 到目标角阈值内并稳定；显式传入 `des_x/des_y` 时，才额外要求当前位置距离保持点不超过 `position_tolerance`。
 ```
 
 当前默认关键参数：
 
 ```text
 DEFAULT_SEGMENTED_YAW_STEP_DEG = None
-DEFAULT_SEGMENTED_YAW_STEP_DEG_CURRENT_POSITION = 10.0   # des_x/des_y 都为 0
+DEFAULT_SEGMENTED_YAW_STEP_DEG_CURRENT_POSITION = 45.0   # des_x/des_y 都为 0
 DEFAULT_SEGMENTED_YAW_STEP_DEG_INPUT_POSITION = 360.0    # 使用输入保持点
 DEFAULT_ROTATE_POSITION_TOLERANCE = 0.05m
 DEFAULT_ROTATE_POSITION_MAX_CMD = 600
@@ -461,7 +466,7 @@ DEFAULT_DIRECTION_STABLE_SEC = 1.0
 3. 用目标点距离做 PID，输出速度标量 scalar_cmd。
 4. 将 map/world 下的目标误差向量转换到固定航向对应的车体前进/横移轴。
 5. 按实时向量比例分配到 ch0 横移和 ch2 前进。
-6. 若航向误差超过 YAW_GATE_DEG，停车等待下位机 yaw PID 转回阈值内。
+6. 若航向误差超过 YAW_GATE_DEG，停车等待控制器 yaw PID 转回阈值内。
 7. 到点后停车并进入下一个 waypoint。
 ```
 
@@ -583,19 +588,38 @@ direction  吸取动作方向，1=前方, 2=+90deg/左, 3=-90deg/右, 4=后方
    ```
 4. 调用 `move.control_kfs_pose(..., pose_id=1/2, suction_ch4=1)` 调整到抓取姿态。
 5. 调用 `module.set_kfs_suction(..., suction_on=True)`，发送 `ch4:1->3` 吸取。
-6. 调用 `module.wait_with_kfs_suction(..., duration_sec=3.0)`，保持吸取 3s。
-7. 调用 `move.control_kfs_pose(..., pose_id=3, suction_ch4=3)` 执行过渡态，并保持吸取。
-8. 调用 `move.control_kfs_pose(..., pose_id=4, suction_ch4=3)` 执行存储姿态，并保持吸取。
-9. 调用 `module.set_kfs_suction(..., suction_on=False)`，发送 `ch4:3->1` 释放。
-10. 调用 `move.control_kfs_pose(..., pose_id=0, suction_ch4=1)` 回 0 态。
-11. 调用 `module.move_backward_to_des(..., x/y=当前 stair_id 中心坐标, target_deg=0.0)` 倒退回当前台阶中心。
-12. 显式复位 KFS 相关通道：`ch4=1,ch5=1,ch6=1,ch7=1`。
+6. 调用 `module.wait_with_kfs_suction(..., duration_sec=2.0)`，默认保持吸取 2.0s。
+7. 主线程先收口为 `ch4=3,ch5=1,ch6=1,ch7=1`，随后启动 `module.start_kfs_post_suction_thread(...)` 异步执行 `pose_id=3 -> pose_id=4 -> 释放吸盘 -> 回0态 -> 复位KFS通道`，`fetch_and_store_kfs()` 立即返回。
+
+注意：`fetch_and_store_kfs()` 当前不再自动倒退回当前台阶中心；如果后续任务需要回中心，应由外层流程显式调用底盘移动动作。
 
 相关底层函数：
 
 - `move.control_kfs_pose(sender, pose_id, ..., suction_ch4=...)`
 - `module.set_kfs_suction(sender, suction_on=True/False, ...)`
 - `module.wait_with_kfs_suction(sender, duration_sec, ...)`
+- `module.start_kfs_post_suction_thread(sender, ...)`：当前由 `fetch_and_store_kfs()` 在吸取保持完成后启动；只管理 KFS 机械臂/吸盘后续，不执行回中心。
+
+KFS 后续的主流程边界：
+
+```text
+1. 主流程完成抓取姿态、吸盘吸取和吸取保持。
+2. 主流程启动 KFS 后续线程后返回，后续线程异步完成机械臂过渡/存储/释放/回0。
+3. 主流程随后可继续下一步，尤其可与上下楼自动动作并发；但所有模式触发上升沿必须通过 `AUTO_TRIGGER_LOCK` 互斥。
+4. 主流程按任务需要决定是否显式执行 move_backward_to_des(...) 或 move_to_des(...) 回当前台阶中心。
+```
+
+不要把回中心放进 KFS 后续线程；回中心会写 `ch0/ch2/des_yaw_i16`，和下一任务并发时会抢底盘移动通道。当前理解是：上楼梯和 KFS 姿态都是边沿触发后由控制器自动执行，触发后的持续通道值不会改变已经启动的自动任务；关键是安排好各自动任务的触发边沿时序，避免在同一时刻互相覆盖模式/触发通道。
+
+当前所有“回退到中心点”相关逻辑位置：
+
+```text
+module.move_backward_to_des(...)
+  通用倒退到指定坐标封装，底层调用 move.move_backward_to_target(...)。
+
+module.descend(...)
+  下楼触发完成后，调用 move_backward_to_des(...) 倒退到目标 to_pos 的中心坐标。
+```
 
 `fetch_and_store_kfs()` 当前还支持测试用等待参数：
 
@@ -609,24 +633,58 @@ module.fetch_and_store_kfs(
 )
 ```
 
-未传时继续使用默认等待；`catch.py` 可按现场调试覆盖。当前高/低位抓取在机械臂和吸盘时序上是对称的：区别只在 `pose_id=1/2`；但完整流程不完全对称，因为 `adjust_position()` 中 `height_relation=1` 走“转向后定时 ch2=200 前进 2s”，`height_relation=2` 走坐标微调。
+未传时继续使用默认等待；当前高/低位抓取在机械臂和吸盘时序上是对称的：区别只在 `pose_id=1/2`；但完整流程不完全对称，因为 `adjust_position()` 中 `height_relation=1` 走“转向后定时 ch2=200 前进 2s”，`height_relation=2` 走坐标微调。
 
 当前 `fetch_and_store_kfs()` 已做过语法检查和部分现场调试，但完整自动抓取并存储流程仍需继续实机验证。
 
-当前结束状态需要特别注意：流程末尾会执行吸盘释放、`pose_id=0` 回 0 态，然后再移动回当前台阶中心；随后显式复位 KFS 相关通道。因此成功结束后通常保留：
+当前结束状态需要特别注意：`fetch_and_store_kfs()` 返回时后续线程通常仍在运行，主线程刚收口后通常保留：
 
 ```text
 ch0=0
 ch2=0
 ch3=0
-ch4=1
+ch4=3
 ch5=1
 ch6=1
 ch7=1
-des_yaw_i16=final_target_yaw_deg 对应值
+des_yaw_i16=微调/移动阶段最后保留的目标航向
 ```
 
-也就是说，吸盘已释放、机械臂已回 0 态，并且已经退出 KFS 模式。
+KFS 后续线程完成后会执行吸盘释放、`pose_id=0` 回 0 态，并最终复位到 `ch4=1,ch5=1,ch6=1,ch7=1`。
+
+当前 KFS 后续线程时序：
+
+```text
+pose3 过渡:
+  lock
+  ch4=3,ch5=2,ch6=3,ch7=1  0.1s
+  ch4=3,ch5=2,ch6=3,ch7=3  0.3s
+  ch4=3,ch5=1,ch6=1,ch7=1
+  unlock
+  sleep 3.0s
+
+pose4 存储:
+  lock
+  ch4=3,ch5=2,ch6=4,ch7=1  0.1s
+  ch4=3,ch5=2,ch6=4,ch7=3  0.4s
+  ch4=3,ch5=1,ch6=1,ch7=1
+  unlock
+  sleep 1.5s
+
+释放吸盘:
+  lock
+  ch4=3,ch5=2  0.1s
+  ch4=1,ch5=2  0.5s
+  ch4=1,ch5=1,ch6=1,ch7=1
+  unlock
+  sleep 2.0s
+
+回 0 态:
+  lock
+  ch4=1,ch5=2,ch6=0,ch7=0  0.1s
+  ch4=1,ch5=1,ch6=1,ch7=1
+  unlock
+```
 
 ## Weapon 抓取流程
 
@@ -646,6 +704,15 @@ des_yaw_i16=final_target_yaw_deg 对应值
 - 5: `(-1.834, 1.40)`
 - 6: `(-1.641, 1.40)`
 
+当前 odin weapon 外参：
+
+```text
+LIDAR_TO_WEAPON_X = 0.107
+LIDAR_TO_WEAPON_Y = -0.446
+```
+
+该值按 yaw=90deg 时尺量实际 weapon 位置相对目标偏差 `(-0.175, -0.18)` 做过一次修正：`X -= 0.18`、`Y += 0.175`。
+
 当前 mid360 默认值：
 
 - 1: `(-0.32, 4.12)`
@@ -655,20 +722,22 @@ des_yaw_i16=final_target_yaw_deg 对应值
 - 5: `(0.483, 4.12)`
 - 6: `(0.681, 4.12)`
 
-当前流程：
+当前流程默认移动速度 `v=300`：
 
-1. 以 `reference="weapon"` 移动 weapon/夹爪到目标点，固定航向默认 `90deg`。
-2. 进入武器模式并夹紧抬起：
+1. 读取 `WEAPON_TARGETS[weapon_id] = (des_x, des_y)`。
+2. 先以 `reference="weapon"`、固定航向默认 `90deg` 移动到前置点 `(des_x, des_y - 2.0)`，前置距离由 `weapon_approach_offset_y=2.0` 控制。
+3. 再以 `reference="weapon"`、固定航向默认 `90deg` 移动到真实 weapon 目标点 `(des_x, des_y)`。
+4. 进入武器模式并夹紧抬起：
    ```text
    ch5=3, ch4=1, ch1=0     保持 0.3s
    ch5=3, ch4=1, ch1=0     保持 0.3s
    ch5=3, ch4=3, ch1=0     保持 1.0s
    ch5=3, ch4=3, ch1=100   保持 1.0s
    ```
-3. 保持 `ch5=3,ch4=3,ch1=100`，以 `90deg` 固定航向、`reference="robot"` 正向移动到中间点 `(-2.4, -1.2)`。
-4. 保持 `ch5=3,ch4=3,ch1=100`，以 `-90deg` 固定航向、`reference="robot"` 正向移动到最终点 `(-2.4, -2.4)`。
-5. 到最终点后保持夹持等待 `5s`。
-6. 当前不在 `fetch_weapon()` 内释放 weapon，最后继续保持夹持：
+5. 保持 `ch5=3,ch4=3,ch1=100`，以 `90deg` 固定航向、`reference="robot"` 正向移动到中间点 `(-2.4, -1.2)`。
+6. 保持 `ch5=3,ch4=3,ch1=100`，以 `-90deg` 固定航向、`reference="robot"` 正向移动到最终点 `(-2.4, -2.4)`。
+7. 到最终点后保持夹持等待 `5s`。
+8. 当前不在 `fetch_weapon()` 内释放 weapon，最后继续保持夹持：
    ```text
    ch5=3, ch4=3, ch1=100, ch2=0
    ```
@@ -686,12 +755,12 @@ ch5=3
 
 也就是保持 weapon 模式、保持抬升、保持夹紧。后续释放/放下/退出 weapon 模式由单独复位方法处理。
 
-`move.reset_weapon_after_fetch(sender)` 已封装 weapon 释放/退出动作：
+`move.reset_weapon_after_fetch(sender)` 已封装 weapon 松开、放下并退出动作：
 
 ```text
-1. ch4=1 释放 weapon 气缸。
-2. 等待 3s。
-3. ch1=0,ch5=1，停止抬升并退出 weapon 模式。
+1. ch4=1,ch1=0，同时松开夹爪并放下。
+2. 等待 1s。
+3. ch5=1，退出 weapon 模式并切回默认模式。
 ```
 
 ## 动作矩阵与 KFS 路线
@@ -727,6 +796,9 @@ module.execute_action_row(
     odom_runtime,
     action_row,
     final_direction=1,
+    next_from_pose=0,
+    next_to_pose=0,
+    next_height_action=0,
 )
 ```
 
@@ -734,13 +806,15 @@ module.execute_action_row(
 
 - 接收一行 `action_row`，格式仍为 `[from_pos, to_pos, move_dir, height_action, grab_action]`。
 - 新增 `final_direction` 输入，默认 `1`，必须是 `1/2/3/4`，表示本行任务完成后的最终朝向。
+- 新增下一行上下文输入：`next_from_pose=0`、`next_to_pose=0`、`next_height_action=0`。单独调用时默认都为 `0`；矩阵循环执行时由 `execute_action_matrix()` 自动传入下一行的 `from_pos/to_pos/height_action`。
 - 检查行长度必须为 `5`，否则打印错误并 `sys.exit(1)`。
 - 行长度正确后，先读取 `from_pos/to_pos`，通过 `tools.stair_id_to_direction(from_pos, to_pos)` 推导相邻方向，再调用 `module.get_stair_height_relation(from_pos, inferred_direction)` 获取高低关系并存入结果；`from_pos == to_pos` 时高低关系记为 `0`。
 - 检查 `move_dir` 必须与 `from_pos/to_pos` 的坐标推导方向一致；不一致时直接报错退出。
 - 检查 `move_dir` 必须为 `0/1/2/3/4`，否则打印错误并 `sys.exit(1)`。
 - 当前地图相邻台阶不存在等高普通平移，因此新增防御检查：如果 `move_dir != 0 and height_action == 0 and grab_action == 0`，视为动作矩阵错误并 `sys.exit(1)`。
 - `move_dir != 0` 时才获取 `from_x/from_y/to_x/to_y`，来源是 `module.get_stair_xy(from_pos/to_pos)`；原地分支暂不预取坐标。
-- `grab_action == 1` 时调用 `module.fetch_and_store_kfs(...)`，输入 `stair_id=from_pos`、`direction=move_dir`、`final_target_yaw_deg=tools.direction_int_to_yaw_deg(final_direction)`；执行完立即返回。
+- `grab_action == 1` 时先调用 `module.fetch_and_store_kfs(...)`，输入 `stair_id=from_pos`、`direction=move_dir`、`final_target_yaw_deg=tools.direction_int_to_yaw_deg(final_direction)`；吸取完成后再按下一行上下文决定是否正向回当前台阶中心。
+- KFS 分支回中心判断：如果 `next_height_action == 1`，会用 `next_from_pose/next_to_pose` 推导下一行方向并读取下一行高低关系；当下一行高低关系为 `1` 且本行 `to_pos == next_to_pose` 时，不执行回中心，直接返回。其他情况调用 `move_to_des(x=from_x, y=from_y, target_deg=tools.direction_int_to_yaw_deg(move_dir))` 正向移动回当前台阶中心。
 - `height_action != 0` 时调用 `module.execute_stair_transition(...)`，把 `from_x/from_y/to_x/to_y/height_relation/move_dir/final_direction` 传入；执行完立即返回。
 - `move_dir == 0` 时仍进入原地占位分支，尚未接入真实动作。
 
@@ -766,17 +840,36 @@ module.execute_stair_transition(
 - `height_relation` 必须是 `1/2`，否则报错并 `sys.exit(1)`。
 - `height_relation == 1`：目标格比当前格高，调用 `module.climb(..., direction1=task_direction, direction2=final_direction, x=to_x, y=to_y)`。
 - `height_relation == 2`：目标格比当前格低，调用 `module.descend(..., direction1=task_direction, direction2=final_direction, current_x=from_x, current_y=from_y, des_x=to_x, des_y=to_y)`。
+- `module.climb()` 上楼前准备动作已改为复用 `module.adjust_position(..., stair_id=-1, height_relation=1)`；高位微调不依赖真实台阶坐标，只用于按 `direction1` 对正并定时前探，不再使用单独的固定 `ch2` 前进 3s 逻辑。
+- 台阶相关到点移动统一使用 `module.STAIR_MOVE_MAX_CMD = 200`：包括上楼后正向到目标格中心、下楼后倒退到目标格中心，以及 KFS 后需要正向回当前格中心的动作。
+- 底层上楼 `move.climb()` 与下楼 `move.descend()` 的 fire 保持时间默认都是 `0.3s`；arm 默认 `0.1s`。上下楼触发段使用 `tools.AUTO_TRIGGER_LOCK`，复位到 idle 后释放锁，等待高度/位移完成条件时不继续持锁或反复写 idle 通道。
+- 下楼触发时会显式写 `ch7=1`，避免 KFS/上楼遗留触发通道；上楼按当前要求不额外写 `ch6`。
 
-`module.fetch_and_store_kfs(...)` 也已新增 `final_target_yaw_deg=0.0` 输入。吸取并存储完成后，最后倒退回当前 `stair_id` 中心点时，会把 `final_target_yaw_deg` 传给 `move_backward_to_des(..., target_deg=final_target_yaw_deg)`，因此执行矩阵行时可以通过 `final_direction` 控制夹取后的最终朝向。
+`module.fetch_and_store_kfs(...)` 当前保留 `final_target_yaw_deg=0.0` 输入用于接口兼容，本身不自动倒退回当前 `stair_id` 中心点；KFS 后是否正向回当前中心点由 `execute_action_row()` 根据下一行上下文决定。
+
+当前 KFS 后续是异步式：`fetch_and_store_kfs()` 只等待吸取保持完成并启动 `start_kfs_post_suction_thread()` 后返回；过渡、存储、释放、回 0 态和通道复位由后续线程执行。
 
 当前真实动作已接入 `grab_action == 1` 和 `height_action != 0` 两类方向动作。按当前真实场地和规划规则，不应接入等高普通移动分支；如果后续地图允许相邻等高台阶，再重新讨论并补普通移动封装。
 
-后续再封装整矩阵循环执行函数，例如：
+当前已封装整矩阵循环执行函数：
 
 ```python
-def execute_action_matrix(sender, position_runtime, odom_runtime, action_matrix, ...):
-    ...
+module.execute_action_matrix(
+    sender,
+    position_runtime,
+    odom_runtime,
+    action_matrix,
+    final_direction=1,
+    stop_on_unimplemented=True,
+)
 ```
+
+逻辑：
+
+- 接收 `n*5` 动作矩阵，也兼容单行 `5` 列输入。
+- 顺序调用 `module.execute_action_row(...)`，每行统一传入当前 `final_direction`，并自动传入下一行的 `from_pos/to_pos/height_action`。
+- 返回 `row_count/final_direction/results`，其中 `results` 是每行执行结果列表。
+- 默认 `stop_on_unimplemented=True`；遇到原地分支或其他 `implemented=False` 的未接入真实动作行时，立即打印错误并 `sys.exit(1)`。这是硬件动作保守边界，避免矩阵里有尚未确认的动作时被静默跳过。
 
 推荐分层：
 
@@ -804,6 +897,7 @@ lib2/move.py               只负责底层阻塞动作
 - `lib2/position_resource.py`：资源层，负责当前 `position_lib`、后端相关台阶坐标/矩阵、`PositionRuntime`、`OdomRuntime`、位置线程和 odom 线程。`tools.py` 默认读取这里的台阶矩阵，避免 `lib2` 内部为了资源反向依赖 `module.py`。
 - `lib2/module.py`：动作解释和组合动作封装层。`execute_action_row()` 应只解释矩阵并调用已有组合动作；不要在这里重写 TCP 协议、底层通道细节或资源线程实现。
 - `lib2/move.py`：底层阻塞动作和通道时序，例如旋转、移动、上下楼底层触发、KFS 姿态触发。
+- `module.execute_action_matrix()`：已接入矩阵级顺序执行，只负责逐行调用 `execute_action_row()`；默认遇到未实现分支会报错退出。
 
 ### 资源层拆分状态
 
@@ -856,21 +950,27 @@ from_x/from_y       move_dir != 0 分支内按需读取
 to_x/to_y           move_dir != 0 分支内按需读取
 move_dir            当前任务方向，仍传 int，不要提前转角度
 final_dir           最终方向，也传 int；上下楼函数内部会转角度
+next_from/to/height 下一行上下文；KFS 分支用于判断抓取后是否正向回当前台阶中心
 height_action       1=需要上下楼，0=不上下楼；上/下由 height_relation 判断
 grab_action         1=抓取，0=不抓取；当前矩阵生成层只输出 0/1
 ```
 
-注意：`module.climb()`、`module.descend()` 内部已经完成方向 int 到角度转换；`module.fetch_and_store_kfs()` 的夹取方向仍传 int，但最终朝向现在传 `final_target_yaw_deg`，当前 `execute_action_row()` 会由 `final_direction` 统一转换。只有直接调用 `move_to_des()` 时才需要传 `target_deg`，但当前规划保证不出现等高普通移动，暂不把普通移动作为主分支。
+注意：`module.climb()`、`module.descend()` 内部已经完成方向 int 到角度转换；`module.fetch_and_store_kfs()` 的夹取方向仍传 int。KFS 抓取后的正向回中心由 `execute_action_row()` 负责，固定航向角使用本行 `move_dir` 转出的角度。只有直接调用 `move_to_des()` 时才需要传 `target_deg`，但当前规划保证不出现等高普通移动，暂不把普通移动作为主分支。
 
 当前验证状态：
 
-- 已运行 `python3 -m py_compile lib2/module.py`。
+- 已运行 `python3 -m py_compile lib2/module.py lib2/move.py read_matrix.py`，确认 KFS 主流程、原地旋转 45 度分段、解释脚本均语法通过。
+- 已运行 `python3 read_matrix.py`，确认动作矩阵解释输出与当前 KFS 流程一致；注意 README 中的解释脚本输出可能仍需随异步后续文案继续同步。
+- 已运行 `python3 -m py_compile descend.py`，确认 `-1 -> 2` 上楼、`2 -> 5` KFS、`2 -> -1` 下楼测试脚本语法通过。
+- 已运行 `python3 -m py_compile rigion_1.py`，确认简化矩阵测试脚本语法通过。
+- 已运行 `python3 -m py_compile rigion_2.py`，确认完整 weapon + 矩阵测试脚本语法通过。
 - 已运行 `python3 -m py_compile lib2/position_resource.py lib2/module.py lib2/tools.py lib2/move.py`。
 - 已运行 `python3 -m py_compile utils/utils.py`。
-- 已运行 `python3 -m py_compile catch.py`，当前 `catch.py` 是 odin `1 -> 2` KFS 抓取调试脚本。
+- 已运行 `python3 -m py_compile catch.py`，当前 `catch.py` 是 odin `fetch_weapon(weapon_id=1)` 完整流程调试脚本，速度 `300`。
 - 已运行 `python3 -m py_compile up_down_test.py`，最后一段已替换为 `1 -> 2` KFS 抓取。
 - 已运行 `python3 -m py_compile move_test.py`，当前旧 vector PID waypoint 测试可语法通过；主移动链路已改为当前 yaw 位置保持式移动。
 - 已运行 `python3 -m py_compile move_t.py rotation_move.py ori_rot.py fwd.py`，当前移动/旋转/前进调试脚本均可语法通过。
+- 已运行 `python3 -m py_compile lib2/position_odin.py lib2/module.py lib2/move.py lib2/tools.py`，确认 odin weapon 外参、KFS 异步后续、上下楼锁和触发时序语法通过。
 - 已运行 `python3 -m py_compile ori_rot.py lib2/move.py`，确认循环旋转测试和动态旋转分段默认可语法通过。
 - 已做资源层 smoke test：`module.get_stair_xy(2)` 与 `position_resource.get_stair_xy(2)` 一致，且 `module.position_lib is position_resource.position_lib` 为 `True`。
 - 已用 `build_action_matrix_from_qr("000020020200")` 做过一次无 GUI 生成检查，确认 `height_action` 和 `grab_action` 都只输出 `0/1`。
@@ -898,8 +998,12 @@ grab_action         1=抓取，0=不抓取；当前矩阵生成层只输出 0/1
 - 抓取后普通移动现在不会覆盖 `ch1/ch4/ch5`，因为 `move.move_to_target()` 只写 `ch0/ch2/ch3/des_yaw_i16`。但上下楼组合动作仍会切换 `ch5=1`，带 weapon 上下楼前必须单独设计夹持保持策略。
 - 通道构建逻辑从“外部构造完整 channels 并整体覆盖”改为“只设置内部通道变量，后台线程统一构帧”后，不能再依赖隐式安全默认值。每个动作完成后都会保留最后写入的模式/触发通道，必须显式确认是否需要复位。
 - `fetch_weapon()` 最新流程在 `(-2.4,-2.4)` 等待 `5s` 后不再释放 weapon，最后保持 `ch1=100,ch4=3,ch5=3`；后续释放/放下/退出 weapon 模式由单独复位方法处理。
-- `fetch_and_store_kfs()` 最新流程会释放吸盘、回 0 态、倒退回中心，并最终显式复位为 `ch4=1,ch5=1,ch6=1,ch7=1`；后续若仍要继续 KFS，需要重新进入 `ch5=2`。
-- `suck.py` 直连测试中，若下位机显示 `ch4` 只保持一次或一小段时间，必须区分“原始网口帧 ch4”与“下位机业务层内部映射/边沿状态”。上位机侧可通过打印实际发送帧确认，但不要把下位机内部恢复为 `1` 误判为上位机没有发 `3`。
+- `fetch_weapon()` 第一段已改为两段 weapon-reference 靠近：先到 `(des_x, des_y - 2.0)`，再到 `(des_x, des_y)`；默认速度已改为 `v=300`。`catch.py` 当前只测试 `weapon_id=1` 的完整 `fetch_weapon()` 流程。
+- `fetch_weapon()` 到 weapon 点后会先持续进入武器模式 `ch5=3,ch1=0,ch4=1,ch6=1,ch7=1`，再执行夹紧和 `ch1=100` 抬升；如果现场仍触发升降动作，应优先检查控制器实际模式映射或自动动作状态机。
+- `fetch_and_store_kfs()` 最新流程已改为异步后续：吸取保持默认 `2.0s`，主线程启动 `start_kfs_post_suction_thread()` 后返回；后续线程负责 pose3、pose4、KFS 模式下释放吸盘、回 0 态和最终复位。
+- KFS 释放吸盘必须在 `ch5=2` 模式下打 `ch4:3->1` 下降沿；曾只写 `ch4` 导致中间上楼后 `ch5=1`，吸盘没有释放。当前释放阶段已加锁并先写 `ch5=2`。
+- `descend()` 下楼前会把 `direction1` 取反方向对正，例如 `2 -> -1` 推导 `direction1=4`，下楼前对正到 `0.01deg`。这符合“车头朝上一级、倒退下楼”的假设；但下楼后的 `move_backward_to_des(... target_deg=final_direction)` 当前会在移动过程中使用 `final_direction + 180deg`，不是严格保持下楼前 yaw 直接倒退。若现场要求保持当前 yaw 退回目标中心，需要新增下楼专用回中心封装。
+- `suck.py` 直连测试中，若现场显示 `ch4` 只保持一次或一小段时间，必须区分“原始网口帧 ch4”与“控制端业务层内部映射/边沿状态”。上位机侧可通过打印实际发送帧确认，但不要把控制端内部恢复为 `1` 误判为上位机没有发 `3`。
 - `DEFAULT_MOVE_GATE_DEG=2.0` 对固定 `90deg` 移动偏紧，现场日志中多次出现 `yaw_error` 稳定在 `2.x~4.xdeg` 导致 `ch0/ch2=0`。如果主要验证平移方向和 PID，先临时放宽门控比继续调 PID 更有效。
 
 ### README 更新要求
@@ -920,12 +1024,12 @@ grab_action         1=抓取，0=不抓取；当前矩阵生成层只输出 0/1
 - `utils/meilin.py` 已把 matplotlib 改为 `visualize()` 内按需导入，避免纯规划时被本机 numpy/matplotlib ABI 问题影响。
 - `level_2.py` 到点后不旋转是通过 `TARGET_FINAL_YAW_DEG = None` 实现。
 - 旧 `level_1.py` 和 `lib/` 仍可能依赖旧 odin 逻辑，不是当前主流程。
-- 如果 pose 或 odometry 出现 `NaN/inf`，`move.py` 已加有限值保护，会停车跳过该轮，避免把非法 yaw 发给下位机。
-- 当前 TCP 连接和首帧发送都不能证明下位机业务层已经执行，仍需现场观察或后续加 ACK。
+- 如果 pose 或 odometry 出现 `NaN/inf`，`move.py` 已加有限值保护，会停车跳过该轮，避免把非法 yaw 发给控制器。
+- 当前 TCP 连接和首帧发送都不能证明控制器业务层已经执行，仍需现场观察或后续加 ACK。
 - 移动到点能较准；旋转逻辑已加入位置保持，但是否能抑制麦克纳姆轮机械误差仍需实机继续验证。`level_2.py` 默认到点后不最终旋转。
 - KFS 新协议的关键点是 `ch5=2,ch6=1/2,ch7:1->3` 触发高/低位抓取，完成后依次触发 `ch6=3` 过渡态、`ch6=4` 存储姿态；`ch7=0` 回归 0 态；`ch5=2,ch4:1->3` 吸取，`ch5=2,ch4:3->1` 释放。
-- `catch.py` 现在会持续打印 `frame_thread` 当前通道、yaw、目标 yaw 和发送状态；调试 KFS 时可以直接看 `ch5=2,ch6=pose_id,ch7=1->3` 是否按预期发出。
+- `catch.py` 当前不是 KFS 调试脚本，而是 `fetch_weapon(weapon_id=1)` 调试脚本；会打印 robot/weapon pose、weapon 到目标距离，并执行完整 weapon 抓取流程。
 - `1 -> 2` 当前矩阵推导为 `direction=3`、`height_relation=2`、`pose_id=2`，是低位抓取；`-1 -> 2` 当前为 `direction=1`、`height_relation=1`、`pose_id=1`，是高位抓取。
 - `move.py` 主移动逻辑已取消 yaw gate 停车；`move_test.py` 仍保留旧 yaw gate 测试逻辑，调试旧脚本时仍需注意门控过紧会让 `ch0/ch2` 长时间为 0。
 - `move.py` 主移动逻辑已取消旧 PID 标量和 `MIN_ACTIVE_MOVE_CMD`；当前位置保持式移动临近目标推不动车时，优先调 `DEFAULT_ROTATE_POSITION_KP` 或本次速度上限。
-- `rotate_to_target_yaw_segmented()` 未传保持点时用当前位置保持且默认 `10deg` 分段；传入 `des_x/des_y` 时用输入点保持且默认 `360deg` 分段。`target_yaw_deg=0.0` 仍是关闭航向 PID，不是转到 0 度。
+- `rotate_to_target_yaw_segmented()` 未传保持点时用当前位置做过程保持且默认 `45deg` 分段，但退出只看 yaw 到位稳定；传入 `des_x/des_y` 时用输入点保持、默认 `360deg` 分段，退出还要求位置到保持点容差内。`target_yaw_deg=0.0` 仍是关闭航向 PID，不是转到 0 度。

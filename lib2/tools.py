@@ -20,6 +20,7 @@ CHANNEL_COUNT = 10
 LEN = 0x1A
 SAFE_SWITCH_VALUE = 1
 relocalization_flag = False
+AUTO_TRIGGER_LOCK = threading.Lock()
 
 
 def connect(tcp_ip=TCP_IP, tcp_port=TCP_PORT, retry_interval=CONNECT_RETRY_INTERVAL):

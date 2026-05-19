@@ -10,10 +10,10 @@ from lib2 import module, move, tools
 LIDAR_TYPE = 1
 ODOM_TOPIC = "/odin1/odometry_highfreq"
 
-TARGET_X = -0.8
-TARGET_Y = -4.8
-#TARGET_X = -2.4
-#TARGET_Y = -0.0
+#TARGET_X = -0.8
+#TARGET_Y = -4.8
+TARGET_X = -2.4
+TARGET_Y = -0.0
 TARGET_YAW_DEG = 180.0
 
 WAIT_READY_TIMEOUT_SEC = 8.0
