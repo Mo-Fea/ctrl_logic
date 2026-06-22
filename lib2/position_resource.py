@@ -18,7 +18,7 @@ ENTRANCE_X = 2.92
 ENTRANCE_Y = 0.92
 PRE_ENTRANCE_X = 1.80
 PRE_ENTRANCE_Y = 0.957
-STAIR_SIDE_LENGTH = 1.2 #m
+STAIR_SIDE_LENGTH = 1.175 #m
 DEFAULT_POSITION_PREDICTION_CONTROL_DELAY_SEC = 1.0 / 70.0
 DEFAULT_POSITION_PREDICTION_MAX_DT_SEC = 0.10
 
@@ -28,23 +28,75 @@ def get_position_lib():
 
 
 def get_entrance_x():
+    getter = getattr(position_lib, "get_entrance_x", None)
+    if getter is not None:
+        return float(getter())
     return float(getattr(position_lib, "ENTRANCE_X", ENTRANCE_X))
 
 
 def get_entrance_y():
+    getter = getattr(position_lib, "get_entrance_y", None)
+    if getter is not None:
+        return float(getter())
     return float(getattr(position_lib, "ENTRANCE_Y", ENTRANCE_Y))
 
 
 def get_pre_entrance_x():
+    getter = getattr(position_lib, "get_pre_entrance_x", None)
+    if getter is not None:
+        return float(getter())
     return float(getattr(position_lib, "PRE_ENTRANCE_X", PRE_ENTRANCE_X))
 
 
 def get_pre_entrance_y():
+    getter = getattr(position_lib, "get_pre_entrance_y", None)
+    if getter is not None:
+        return float(getter())
     return float(getattr(position_lib, "PRE_ENTRANCE_Y", PRE_ENTRANCE_Y))
 
 
 def get_stair_side_length():
     return float(getattr(position_lib, "STAIR_SIDE_LENGTH", STAIR_SIDE_LENGTH))
+
+
+def build_stair_height_relation_matrix_red(entrance_x, entrance_y, side):
+    return [
+        [-1, 1, 0, 0, entrance_x - side, entrance_y],
+        [1, 1, 0, 2, entrance_x, entrance_y + side],
+        [2, 1, 1, 1, entrance_x, entrance_y],
+        [3, 2, 2, 0, entrance_x, entrance_y - side],
+        [4, 2, 0, 2, entrance_x + side, entrance_y + side],
+        [5, 1, 1, 2, entrance_x + side, entrance_y],
+        [6, 1, 1, 0, entrance_x + side, entrance_y - side],
+        [7, 2, 0, 1, entrance_x + 2 * side, entrance_y + side],
+        [8, 2, 2, 2, entrance_x + 2 * side, entrance_y],
+        [9, 2, 1, 0, entrance_x + 2 * side, entrance_y - side],
+        [10, 2, 0, 1, entrance_x + 3 * side, entrance_y + side],
+        [11, 0, 2, 2, entrance_x + 3 * side, entrance_y],
+        [12, 2, 1, 0, entrance_x + 3 * side, entrance_y - side],
+        [13, 0, 0, 0, entrance_x + 4 * side, entrance_y + side],
+        [15, 0, 0, 0, entrance_x + 4 * side, entrance_y - side],
+    ]
+
+
+def build_stair_height_relation_matrix_blue(entrance_x, entrance_y, side):
+    return [
+        [-1, 1, 0, 0, entrance_x - side, entrance_y],
+        [1, 1, 2, 0, entrance_x, entrance_y - side],
+        [2, 1, 1, 1, entrance_x, entrance_y],
+        [3, 2, 0, 2, entrance_x, entrance_y + side],
+        [4, 2, 2, 0, entrance_x + side, entrance_y - side],
+        [5, 1, 2, 1, entrance_x + side, entrance_y],
+        [6, 1, 0, 1, entrance_x + side, entrance_y + side],
+        [7, 2, 1, 0, entrance_x + 2 * side, entrance_y - side],
+        [8, 2, 2, 2, entrance_x + 2 * side, entrance_y],
+        [9, 2, 0, 1, entrance_x + 2 * side, entrance_y + side],
+        [10, 2, 1, 0, entrance_x + 3 * side, entrance_y - side],
+        [11, 0, 2, 2, entrance_x + 3 * side, entrance_y],
+        [12, 2, 0, 1, entrance_x + 3 * side, entrance_y + side],
+        [13, 0, 0, 0, entrance_x + 4 * side, entrance_y - side],
+        [15, 0, 0, 0, entrance_x + 4 * side, entrance_y + side],
+    ]
 
 
 def build_stair_height_relation_matrix():
@@ -58,27 +110,10 @@ def build_stair_height_relation_matrix():
     """
     entrance_x = get_entrance_x()
     entrance_y = get_entrance_y()
-    pre_entrance_x = get_pre_entrance_x()
-    pre_entrance_y = get_pre_entrance_y()
     side = get_stair_side_length()
-
-    return [
-        [-1, 1, 0, 0, entrance_x - side, entrance_y],
-        [1, 2, 0, 2, entrance_x, entrance_y + side],
-        [2, 1, 1, 1, entrance_x, entrance_y],
-        [3, 1, 2, 0, entrance_x, entrance_y - side],
-        [4, 1, 0, 1, entrance_x + side, entrance_y + side],
-        [5, 1, 2, 1, entrance_x + side, entrance_y],
-        [6, 2, 0, 2, entrance_x + side, entrance_y - side],
-        [7, 2, 0, 1, entrance_x + 2 * side, entrance_y + side],
-        [8, 2, 2, 2, entrance_x + 2 * side, entrance_y],
-        [9, 2, 1, 0, entrance_x + 2 * side, entrance_y - side],
-        [10, 2, 2, 1, entrance_x + 3 * side, entrance_y + side],
-        [11, 0, 2, 2, entrance_x + 3 * side, entrance_y],
-        [12, 2, 1, 2, entrance_x + 3 * side, entrance_y - side],
-        [13, 0, 0, 0, entrance_x + 4 * side, entrance_y + side],
-        [15, 0, 0, 2, entrance_x + 4 * side, entrance_y - side],
-    ]
+    if position_backend.is_blue_field():
+        return build_stair_height_relation_matrix_blue(entrance_x, entrance_y, side)
+    return build_stair_height_relation_matrix_red(entrance_x, entrance_y, side)
 
 
 def get_stair_matrix():

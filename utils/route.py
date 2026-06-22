@@ -143,14 +143,12 @@ def path_to_action_matrix(kfs, path):
                 ])
                 taken_set.add(step)
 
-            grab_action = 1 if kfs.get(step) == "R1" else 0
-
             columns.append([
                 current_pos,
                 step,
                 _direction_code(current_pos, step),
                 _height_action(current_pos, step),
-                grab_action,
+                0,
             ])
             current_pos = step
 

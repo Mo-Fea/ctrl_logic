@@ -3,17 +3,18 @@
 import math
 import time
 
-from lib2 import module, tools
+from lib2 import module, move, position_backend, tools
 
 
 LIDAR_TYPE = 1
+FIELD_TYPE = position_backend.FIELD_TYPE_BLUE
 ODOM_TOPIC = "/odin1/odometry_highfreq"
 
-START_STAIR_ID = -1
-START_FIXED_YAW_DEG = 0.01
-MOVE_SPEED = 600
-FINAL_DIRECTION = 1
-HOLD_AFTER_DONE_SEC = 5.0
+START_DELAY_SEC = 10.0
+TARGET_YAW_DEG = 0.01
+FORWARD_CMD = 600
+FORWARD_DURATION_SEC = 10.0
+LOOP_INTERVAL_SEC = 0.02
 
 WAIT_READY_TIMEOUT_SEC = 8.0
 WAIT_READY_STABLE_FRAMES = 5
@@ -64,6 +65,37 @@ def wait_runtime_ready(position_runtime, odom_runtime):
     return False
 
 
+def drive_forward_for_duration(sender):
+    des_yaw_i16 = move.encode_target_yaw_i16(TARGET_YAW_DEG)
+    deadline = time.time() + float(FORWARD_DURATION_SEC)
+    channels = None
+
+    while time.time() < deadline:
+        channels = move.set_motion_channels(
+            sender,
+            lateral_cmd=0,
+            forward_cmd=FORWARD_CMD,
+            rotation_cmd=0,
+            des_yaw_i16=des_yaw_i16,
+        )
+        time.sleep(LOOP_INTERVAL_SEC)
+
+    stop_channels = move.set_motion_channels(
+        sender,
+        lateral_cmd=0,
+        forward_cmd=0,
+        rotation_cmd=0,
+        des_yaw_i16=des_yaw_i16,
+    )
+    return {
+        "completed": True,
+        "duration_sec": float(FORWARD_DURATION_SEC),
+        "forward_cmd": int(FORWARD_CMD),
+        "last_drive_channels": channels,
+        "stop_channels": stop_channels,
+    }
+
+
 def main():
     sender = None
     flag_node = None
@@ -73,7 +105,10 @@ def main():
     odom_runtime = None
 
     try:
-        print("Starting region 1 challenge matrix test...")
+        print("Starting blue timed forward test...")
+        position_backend.set_field_type(FIELD_TYPE)
+        print(f"Field type set to {position_backend.get_field_type()} (BLUE).")
+
         sender, _, flag_node, flag_thread, flag_stop_event = module.init(
             lidar_type=LIDAR_TYPE
         )
@@ -82,44 +117,33 @@ def main():
 
         print("Waiting for robot pose and odometry...")
         if not wait_runtime_ready(position_runtime, odom_runtime):
-            print("Region 1 test failed: runtime data not ready.")
+            print("Blue forward test failed: runtime data not ready.")
             return
 
-        start_x, start_y = module.get_stair_xy(START_STAIR_ID)
+        print(f"Waiting in place for {START_DELAY_SEC:.1f}s...")
+        time.sleep(START_DELAY_SEC)
+
+        print(f"Rotating in place to target_yaw={TARGET_YAW_DEG:.2f} deg...")
+        rotate_result = move.rotate_to_target_yaw_segmented(
+            sender=sender,
+            position_runtime=position_runtime,
+            odom_runtime=odom_runtime,
+            target_yaw_deg=TARGET_YAW_DEG,
+        )
+        if rotate_result is None or rotate_result.get("timed_out"):
+            print("Blue forward test failed: rotate failed.")
+            print(rotate_result)
+            return
+        print("Rotate finished.")
+        print(rotate_result)
+
         print(
-            f"Moving to stair {START_STAIR_ID} "
-            f"({start_x:.3f}, {start_y:.3f}) "
-            f"with fixed_yaw={START_FIXED_YAW_DEG:.2f} deg..."
+            f"Driving forward with ch2={FORWARD_CMD} "
+            f"for {FORWARD_DURATION_SEC:.1f}s..."
         )
-        start_move_result = module.move_to_des(
-            sender=sender,
-            position_runtime=position_runtime,
-            odom_runtime=odom_runtime,
-            x=start_x,
-            y=start_y,
-            target_deg=START_FIXED_YAW_DEG,
-            v=MOVE_SPEED,
-        )
-        if start_move_result is None:
-            print("Region 1 test failed: move to start stair failed.")
-            return
-        print("Move to start stair finished.")
-        print(start_move_result)
-
-        print("Executing CHALLENGE_ACTION_MATRIX...")
-        matrix_result = module.execute_action_matrix(
-            sender=sender,
-            position_runtime=position_runtime,
-            odom_runtime=odom_runtime,
-            action_matrix=module.CHALLENGE_ACTION_MATRIX,
-            final_direction=FINAL_DIRECTION,
-        )
-        print("Challenge action matrix finished.")
-        print(matrix_result)
-
-        print(f"Holding current output for {HOLD_AFTER_DONE_SEC:.1f}s before shutdown...")
-        time.sleep(HOLD_AFTER_DONE_SEC)
-        print("Region 1 challenge matrix test completed.")
+        forward_result = drive_forward_for_duration(sender)
+        print("Forward drive finished.")
+        print(forward_result)
 
     except KeyboardInterrupt:
         print("\nStopped by user.")
@@ -162,6 +186,7 @@ def main():
             extra_stop_event=odom_stop_event,
             shutdown_rclpy=True,
         )
+        print("Blue timed forward test finished.")
 
 
 if __name__ == "__main__":

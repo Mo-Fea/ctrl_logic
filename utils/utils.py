@@ -8,7 +8,7 @@ except ImportError:
     import race
 
 
-TASK_CHALLENGE = "challenge"  # 挑战赛：2个R1、2个R2，使用 race.py
+TASK_CHALLENGE = "challenge"  # 挑战赛：KFS 数量由 race.py 全局变量配置
 TASK_COMBAT = "combat"        # 对抗赛：更多KFS，使用 meilin.py
 
 TASK_TYPE_ALIASES = {
@@ -53,6 +53,11 @@ MOVE_DIR_NAMES = {
 GRAB_ACTION_NAMES = {
     0: "不抓取",
     1: "抓取",
+}
+
+EXIT_ACTION_ROWS = {
+    10: [10, 13, 1, 1, 0],
+    12: [12, 15, 1, 1, 0],
 }
 
 
@@ -126,6 +131,17 @@ def _height_action(from_pos, to_pos, task_type=TASK_CHALLENGE):
     return 0
 
 
+def _append_exit_action(rows):
+    if not rows:
+        return rows
+
+    last_to_pos = int(rows[-1][1])
+    exit_row = EXIT_ACTION_ROWS.get(last_to_pos)
+    if exit_row is not None:
+        rows.append(exit_row.copy())
+    return rows
+
+
 def path_to_action_matrix(kfs, path, task_type=TASK_CHALLENGE):
     """
     Convert planner output into an n*5 robot action matrix.
@@ -164,13 +180,12 @@ def path_to_action_matrix(kfs, path, task_type=TASK_CHALLENGE):
                 ])
                 taken_set.add(step)
 
-            grab_action = 1 if kfs.get(step) == "R1" else 0
             rows.append([
                 current_pos,
                 step,
                 _direction_code(current_pos, step, task_type=task_type),
                 _height_action(current_pos, step, task_type=task_type),
-                grab_action,
+                0,
             ])
             current_pos = step
 
@@ -191,6 +206,7 @@ def path_to_action_matrix(kfs, path, task_type=TASK_CHALLENGE):
         else:
             raise ValueError(f"未知路径步骤：{step}")
 
+    rows = _append_exit_action(rows)
     if not rows:
         return np.zeros((0, 5), dtype=int)
     return np.array(rows, dtype=int)

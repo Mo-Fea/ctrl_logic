@@ -10,7 +10,7 @@ position_lib = position_backend.get_position_backend()
 
 
 # 最终方向到达阈值，当前 yaw 与目标 yaw 的误差小于该值后认为旋转到位，单位 deg。
-DEFAULT_DIRECTION_THRESHOLD_DEG = 2.0
+DEFAULT_DIRECTION_THRESHOLD_DEG = 3.0
 # 默认 yaw 到达阈值；旋转和最终方向检测默认共用 DEFAULT_DIRECTION_THRESHOLD_DEG。
 DEFAULT_YAW_TOLERANCE_DEG = DEFAULT_DIRECTION_THRESHOLD_DEG
 # 方向到达后需要连续保持在阈值内的时间，单位 s；用于避免刚进阈值就退出后又过冲。
@@ -75,7 +75,7 @@ DEFAULT_OVERSHOOT_CHECK_DISTANCE = 0.15
 # 连续多少帧满足过点检测后锁定为已经冲过目标点。
 DEFAULT_OVERSHOOT_CONFIRM_COUNT = 3
 # 到点距离阈值，距离小于该值后认为位置满足到点条件，单位 m。
-DEFAULT_STOP_DISTANCE = 0.02
+DEFAULT_STOP_DISTANCE = 0.065
 # 到点速度阈值，平面线速度小于该值后认为速度足够低，单位 m/s。
 DEFAULT_REACHED_SPEED_MPS = 0.05
 # 到点 yaw 角速度阈值，角速度小于该值后认为旋转足够稳定，单位 rad/s。
@@ -108,6 +108,10 @@ DEFAULT_DESCEND_TRIGGER_ARM_SEC = 0.1
 CLIMB_MODE_CHANNEL_INDEX = 5
 # 升降模式值，ch5 == 1。
 CLIMB_MODE_VALUE = 1
+# 升降模式子功能通道索引，ch6。
+CLIMB_FUNCTION_CHANNEL_INDEX = 6
+# 上楼梯子功能值，ch6 == 1。
+CLIMB_FUNCTION_UP_VALUE = 1
 # 上/下楼梯触发通道索引，ch7。
 CLIMB_TRIGGER_CHANNEL_INDEX = 7
 # 触发通道预置值，用于形成 1 -> 3 上升沿。
@@ -116,34 +120,18 @@ CLIMB_TRIGGER_ARM_VALUE = 1
 CLIMB_TRIGGER_FIRE_VALUE = 3
 # 触发完成后的回归值；新协议中二段开关空闲值使用 1。
 CLIMB_TRIGGER_IDLE_VALUE = 1
-# 下楼梯触发通道索引，ch6。
-DESCEND_TRIGGER_CHANNEL_INDEX = 6
-# 下楼梯触发通道预置值，用于离开3，保证下一次进入3可触发。
-DESCEND_TRIGGER_ARM_VALUE = 1
-# 下楼梯触发值。
-DESCEND_TRIGGER_FIRE_VALUE = 3
-# 下楼梯触发完成后的回归值。
-DESCEND_TRIGGER_IDLE_VALUE = 1
-# KFS/方块模式通道索引，ch5。
-KFS_MODE_CHANNEL_INDEX = 5
-# KFS/方块模式值，ch5 == 2。
-KFS_MODE_VALUE = 2
-# KFS 姿态选择通道索引，ch6。
-KFS_POSE_CHANNEL_INDEX = 6
-# KFS 姿态触发通道索引，ch7。
-KFS_TRIGGER_CHANNEL_INDEX = 7
-# KFS 姿态触发预置值，ch7 常态。
-KFS_TRIGGER_ARM_VALUE = 1
-# KFS 姿态触发值，用于形成 1 -> 3 上升沿。
-KFS_TRIGGER_FIRE_VALUE = 3
-# KFS 回归 0 态触发值。
-KFS_TRIGGER_ZERO_VALUE = 0
-# KFS 姿态触发前等待时间，单位 s。
+# 下楼梯子功能通道索引，ch6。
+DESCEND_FUNCTION_CHANNEL_INDEX = 6
+# 下楼梯子功能值，ch6 == 3。
+DESCEND_FUNCTION_VALUE = 3
+# 四轮锁角子功能值，ch6 == 2。
+WHEEL_LOCK_FUNCTION_VALUE = 2
+# 解锁后恢复的升降模式空闲子功能值。
+WHEEL_UNLOCK_FUNCTION_VALUE = 1
+# KFS 姿态触发前等待时间，供 lib2.kfs 使用，单位 s。
 DEFAULT_KFS_POSE_ARM_WAIT_SEC = 0.5
-# KFS 姿态触发后保持输出等待时间，单位 s。
+# KFS 姿态触发后保持输出等待时间，供 lib2.kfs 使用，单位 s。
 DEFAULT_KFS_POSE_HOLD_SEC = 2.0
-# KFS 回归 0 态阻塞等待时间，单位 s。
-DEFAULT_KFS_ZERO_RETURN_WAIT_SEC = 2.0
 
 
 def normalize_yaw_deg(yaw_deg):
@@ -308,15 +296,12 @@ def rotate_to_target_yaw_segmented(
     timeout_sec=DEFAULT_ROTATE_TIMEOUT_SEC,
 ):
     """
-    带位置保持的分段式对正到目标角。
+    分段式对正到目标角。
 
     每轮读取当前 yaw，沿 current -> target 的劣弧方向给一个最多
     segment_step_deg 的中间目标；当剩余误差小于该步长后，直接给最终目标角。
-    未显式传 segment_step_deg 时，des_x/des_y 都为 0 使用 10deg，否则使用 360deg。
-    des_x/des_y 都为 0 时，进入函数后记录机器人当前位置；否则使用传入坐标。
-    旋转过程中用低速 ch0/ch2 把机器人保持在初始点附近。
-    des_x/des_y 都为 0 时，退出条件只检查 yaw 稳定到位；
-    显式传入 des_x/des_y 时，退出条件还要求当前位置回到 position_tolerance 内。
+    当前已临时屏蔽旋转位置保持逻辑：旋转过程中 ch0/ch2/ch3 始终为 0，
+    退出条件只检查 yaw 是否稳定到位，不再要求回到初始点或输入保持点。
     """
     if float(target_yaw_deg) == 0.0:
         channels = set_motion_channels(sender, des_yaw_i16=0)
@@ -347,13 +332,9 @@ def rotate_to_target_yaw_segmented(
         raise ValueError(f"segment_hold_sec must be >= 0, got {segment_hold_sec}")
     des_x = float(des_x)
     des_y = float(des_y)
-    require_position_reached = not (des_x == 0.0 and des_y == 0.0)
+    require_position_reached = False
     if segment_step_deg is None:
-        segment_step_deg = (
-            DEFAULT_SEGMENTED_YAW_STEP_DEG_CURRENT_POSITION
-            if des_x == 0.0 and des_y == 0.0
-            else DEFAULT_SEGMENTED_YAW_STEP_DEG_INPUT_POSITION
-        )
+        segment_step_deg = DEFAULT_SEGMENTED_YAW_STEP_DEG_CURRENT_POSITION
     segment_step_deg = abs(float(segment_step_deg))
     if segment_step_deg <= 0.0:
         raise ValueError(f"segment_step_deg must be > 0, got {segment_step_deg}")
@@ -364,21 +345,9 @@ def rotate_to_target_yaw_segmented(
     position_hold_kp = float(position_hold_kp)
 
     deadline = None if timeout_sec is None else (tools.time.time() + float(timeout_sec))
-    if des_x == 0.0 and des_y == 0.0:
-        start_position = position_runtime.get_current_position()
-        while start_position is None:
-            if deadline is not None and tools.time.time() >= deadline:
-                return None
-            tools.time.sleep(loop_interval_sec)
-            start_position = position_runtime.get_current_position()
-
-        start_x = float(start_position["x"])
-        start_y = float(start_position["y"])
-        hold_position_source = "current_position"
-    else:
-        start_x = des_x
-        start_y = des_y
-        hold_position_source = "input"
+    start_x = None
+    start_y = None
+    hold_position_source = "disabled"
     result = None
     active_des_yaw_deg = None
     last_segment_update_time = 0.0
@@ -387,7 +356,6 @@ def rotate_to_target_yaw_segmented(
 
     while True:
         current_yaw_deg = position_runtime.get_current_yaw_deg()
-        current_position = position_runtime.get_current_position()
         latest_update_time = position_runtime.get_latest_update_time()
         now = tools.time.time()
 
@@ -407,31 +375,12 @@ def rotate_to_target_yaw_segmented(
                 yaw_age_sec=yaw_age_sec,
             )
             final_error_deg = heading_error_deg(current_yaw_deg, target_yaw_deg)
-            position_reached = False
+            position_reached = None
             position_distance_xy = None
             position_dx = None
             position_dy = None
             output_lateral_cmd = 0
             output_forward_cmd = 0
-            if current_position is not None:
-                current_x = float(current_position["x"])
-                current_y = float(current_position["y"])
-                motion_result = _calculate_position_hold_motion(
-                    current_x=current_x,
-                    current_y=current_y,
-                    target_x=start_x,
-                    target_y=start_y,
-                    current_yaw_deg=predicted_yaw_deg,
-                    position_hold_kp=position_hold_kp,
-                    position_hold_max_cmd=position_hold_max_cmd,
-                    stop_distance=position_tolerance,
-                )
-                position_distance_xy = motion_result["distance_xy"]
-                position_dx = motion_result["dx"]
-                position_dy = motion_result["dy"]
-                position_reached = position_distance_xy <= position_tolerance
-                output_lateral_cmd = motion_result["lateral_cmd"]
-                output_forward_cmd = motion_result["forward_cmd"]
 
             in_threshold = abs(final_error_deg) <= float(tolerance_deg)
             if in_threshold:
@@ -441,14 +390,14 @@ def rotate_to_target_yaw_segmented(
                 stable_since = None
             stable_elapsed_sec = 0.0 if stable_since is None else (now - stable_since)
 
-            exit_position_reached = (not require_position_reached) or position_reached
+            exit_position_reached = True
             if in_threshold and stable_elapsed_sec >= float(stable_sec) and exit_position_reached:
                 final_des_yaw_i16 = encode_target_yaw_i16(target_yaw_deg)
                 channels = set_motion_channels(sender, des_yaw_i16=final_des_yaw_i16)
                 return {
                     "channels": channels,
-                    "start_x": float(start_x),
-                    "start_y": float(start_y),
+                    "start_x": start_x,
+                    "start_y": start_y,
                     "hold_position_source": hold_position_source,
                     "current_yaw_deg": float(current_yaw_deg),
                     "predicted_yaw_deg": float(predicted_yaw_deg),
@@ -466,7 +415,7 @@ def rotate_to_target_yaw_segmented(
                         if position_distance_xy is None
                         else float(position_distance_xy)
                     ),
-                    "position_reached": bool(position_reached),
+                    "position_reached": position_reached,
                     "require_position_reached": bool(require_position_reached),
                     "position_tolerance": float(position_tolerance),
                     "stable_sec": float(stable_sec),
@@ -497,8 +446,8 @@ def rotate_to_target_yaw_segmented(
             )
             result = {
                 "channels": channels,
-                "start_x": float(start_x),
-                "start_y": float(start_y),
+                "start_x": start_x,
+                "start_y": start_y,
                 "hold_position_source": hold_position_source,
                 "current_yaw_deg": float(current_yaw_deg),
                 "predicted_yaw_deg": float(predicted_yaw_deg),
@@ -518,7 +467,7 @@ def rotate_to_target_yaw_segmented(
                 ),
                 "position_dx": None if position_dx is None else float(position_dx),
                 "position_dy": None if position_dy is None else float(position_dy),
-                "position_reached": bool(position_reached),
+                "position_reached": position_reached,
                 "require_position_reached": bool(require_position_reached),
                 "position_tolerance": float(position_tolerance),
                 "position_lateral_cmd": int(channels[0]),
@@ -577,130 +526,59 @@ def reset_weapon_after_fetch(sender, settle_sec=1.0):
     """
     阻塞式 weapon 松开并放下动作。
 
-    1. ch4=1, ch1=0，松开夹爪并放下。
-    2. 等待 settle_sec。
-    3. ch5=1，退出 weapon 模式并切回默认模式。
+    1. 调用 weapon_down() 触发夹爪放下。
+    2. 等待 settle_sec，让机械结构完成放下。
+    3. 调用 weapon_loose() 通过 ch4:1->3 打开夹爪。
     """
-    release_and_lower_channels = set_channel_values(
-        sender,
-        channel_values={
-            1: 0,
-            4: tools.SAFE_SWITCH_VALUE,
-        },
-    )
+    from lib2 import weapon as weapon_lib
+
+    down_result = weapon_lib.weapon_down(sender)
     tools.time.sleep(float(settle_sec))
-    reset_channels = set_channel_values(
-        sender,
-        channel_values={
-            5: tools.SAFE_SWITCH_VALUE,
-        },
-    )
+    loose_result = weapon_lib.weapon_loose(sender)
     return {
-        "release_and_lower_channels": release_and_lower_channels,
-        "reset_channels": reset_channels,
+        "down_result": down_result,
+        "loose_result": loose_result,
+        "release_and_lower_channels": loose_result["fire_channels"],
+        "reset_channels": loose_result["reset_channels"],
         "settle_sec": float(settle_sec),
         "completed": True,
     }
 
 
-def _kfs_pose_channel_values(pose_id, trigger_value, suction_ch4=tools.SAFE_SWITCH_VALUE):
+def lock_wheel(sender):
+    """进入升降模式的四轮锁角状态，并持续保持该输出。"""
+    with tools.AUTO_TRIGGER_LOCK:
+        channels = set_channel_values(
+            sender,
+            channel_values={
+                CLIMB_MODE_CHANNEL_INDEX: CLIMB_MODE_VALUE,
+                CLIMB_FUNCTION_CHANNEL_INDEX: WHEEL_LOCK_FUNCTION_VALUE,
+                CLIMB_TRIGGER_CHANNEL_INDEX: CLIMB_TRIGGER_IDLE_VALUE,
+            },
+        )
     return {
-        4: int(suction_ch4),
-        KFS_MODE_CHANNEL_INDEX: KFS_MODE_VALUE,
-        KFS_POSE_CHANNEL_INDEX: int(pose_id),
-        KFS_TRIGGER_CHANNEL_INDEX: int(trigger_value),
+        "action": "lock_wheel",
+        "locked": True,
+        "channels": channels,
+        "completed": True,
     }
 
 
-def control_kfs_pose(
-    sender,
-    pose_id,
-    arm_wait_sec=DEFAULT_KFS_POSE_ARM_WAIT_SEC,
-    hold_sec=DEFAULT_KFS_POSE_HOLD_SEC,
-    zero_return_wait_sec=DEFAULT_KFS_ZERO_RETURN_WAIT_SEC,
-    loop_interval_sec=DEFAULT_DRIVE_LOOP_INTERVAL_SEC,
-    suction_ch4=tools.SAFE_SWITCH_VALUE,
-):
-    """
-    阻塞式 KFS 吸盘机械臂姿态控制。
-
-    pose_id:
-      0: 回归 0 态，发送 ch7=0 并等待 zero_return_wait_sec 后退出。
-      1: 高位方块抓取姿态。
-      2: 低位方块抓取姿态。
-      3: 过渡态。
-      4: 存储方块姿态。
-
-    1~4 态时序：
-      1. ch5=2 进入 KFS 模式，ch6=pose_id，ch7=1，底盘通道和目标航向角置 0。
-      2. 保持 arm_wait_sec。
-      3. ch7 从 1 变为 3 触发姿态动作。
-      4. 保持 hold_sec。
-      5. ch6/ch7 回归常态，其中 ch7 常态为 1。
-
-    suction_ch4:
-      保持 KFS 吸盘通道值；默认 1。吸取后继续调整姿态时应传 3，
-      避免姿态控制帧把 ch4 拉回 1 形成释放下降沿。
-    """
-    pose_id = int(pose_id)
-    if pose_id not in (0, 1, 2, 3, 4):
-        print("KFS姿态输入错误")
-        sys.exit(1)
-
-    if pose_id == 0:
-        zero_channel_values = _kfs_pose_channel_values(
-            pose_id=0,
-            trigger_value=KFS_TRIGGER_ZERO_VALUE,
-            suction_ch4=suction_ch4,
+def unlock_wheel(sender):
+    """退出四轮锁角，恢复升降模式空闲通道值。"""
+    with tools.AUTO_TRIGGER_LOCK:
+        channels = set_channel_values(
+            sender,
+            channel_values={
+                CLIMB_MODE_CHANNEL_INDEX: CLIMB_MODE_VALUE,
+                CLIMB_FUNCTION_CHANNEL_INDEX: WHEEL_UNLOCK_FUNCTION_VALUE,
+                CLIMB_TRIGGER_CHANNEL_INDEX: CLIMB_TRIGGER_IDLE_VALUE,
+            },
         )
-        deadline = tools.time.time() + float(zero_return_wait_sec)
-        while tools.time.time() < deadline:
-            zero_channels = set_channel_values(sender, channel_values=zero_channel_values)
-            tools.time.sleep(float(loop_interval_sec))
-        zero_channels = set_channel_values(sender, channel_values=zero_channel_values)
-        return {
-            "pose_id": 0,
-            "pose_name": "zero_return",
-            "channels": zero_channels,
-            "des_yaw_i16": 0,
-            "zero_return_wait_sec": float(zero_return_wait_sec),
-            "completed": True,
-        }
-
-    arm_channel_values = _kfs_pose_channel_values(
-        pose_id=pose_id,
-        trigger_value=KFS_TRIGGER_ARM_VALUE,
-        suction_ch4=suction_ch4,
-    )
-    arm_deadline = tools.time.time() + float(arm_wait_sec)
-    while tools.time.time() < arm_deadline:
-        arm_channels = set_channel_values(sender, channel_values=arm_channel_values)
-        tools.time.sleep(float(loop_interval_sec))
-
-    fire_channel_values = _kfs_pose_channel_values(
-        pose_id=pose_id,
-        trigger_value=KFS_TRIGGER_FIRE_VALUE,
-        suction_ch4=suction_ch4,
-    )
-    hold_deadline = tools.time.time() + float(hold_sec)
-    while tools.time.time() < hold_deadline:
-        fire_channels = set_channel_values(sender, channel_values=fire_channel_values)
-        tools.time.sleep(float(loop_interval_sec))
-
-    idle_channel_values = _kfs_pose_channel_values(
-        pose_id=1,
-        trigger_value=KFS_TRIGGER_ARM_VALUE,
-        suction_ch4=suction_ch4,
-    )
-    idle_channels = set_channel_values(sender, channel_values=idle_channel_values)
     return {
-        "pose_id": int(pose_id),
-        "arm_channels": arm_channels,
-        "fire_channels": fire_channels,
-        "idle_channels": idle_channels,
-        "des_yaw_i16": 0,
-        "arm_wait_sec": float(arm_wait_sec),
-        "hold_sec": float(hold_sec),
+        "action": "unlock_wheel",
+        "locked": False,
+        "channels": channels,
         "completed": True,
     }
 
@@ -974,12 +852,14 @@ def set_channel_values(
     sender,
     des_yaw_i16=None,
     yaw_i16=None,
+    cylinder_select=None,
     channel_values=None,
 ):
     return sender.set_channel_values(
         validate_channel_values(channel_values),
         yaw_i16=yaw_i16,
         des_yaw_i16=des_yaw_i16,
+        cylinder_select=cylinder_select,
         reset_channels=False,
     )
 
@@ -1452,6 +1332,7 @@ def climb(
 
     with tools.AUTO_TRIGGER_LOCK:
         arm_channel_values = climb_channel_values(CLIMB_TRIGGER_ARM_VALUE)
+        arm_channel_values[CLIMB_FUNCTION_CHANNEL_INDEX] = CLIMB_FUNCTION_UP_VALUE
         arm_deadline = tools.time.time() + float(trigger_arm_sec)
         while tools.time.time() < arm_deadline:
             arm_channels = set_channel_values(sender, channel_values=arm_channel_values)
@@ -1519,8 +1400,8 @@ def descend(
     逻辑：
     1. 记录进入函数时的 z。
     2. 输出升降模式 ch5=1，底盘通道 ch0/ch2/ch3 保持 0。
-    3. ch6 先置 1，再置 3，触发下位机自动下楼梯。
-    4. ch6=3 保持 trigger_hold_sec 后回归 1。
+    3. 预置 ch5=1、ch6=3、ch7=1，再将 ch7 置 3，触发下位机自动下楼梯。
+    4. ch7=3 保持 trigger_hold_sec 后，恢复 ch5=1、ch6=1、ch7=1。
     5. 阻塞等待 start_z - 0.15 > current_z，认为下楼梯完成。
     """
     start_position = position_runtime.get_current_position()
@@ -1529,27 +1410,30 @@ def descend(
 
     start_z = float(start_position["z"])
 
-    def descend_channel_values(trigger_value):
-        return {
-            CLIMB_MODE_CHANNEL_INDEX: CLIMB_MODE_VALUE,
-            DESCEND_TRIGGER_CHANNEL_INDEX: int(trigger_value),
-            CLIMB_TRIGGER_CHANNEL_INDEX: CLIMB_TRIGGER_IDLE_VALUE,
-        }
-
     with tools.AUTO_TRIGGER_LOCK:
-        arm_channel_values = descend_channel_values(DESCEND_TRIGGER_ARM_VALUE)
+        arm_channel_values = {
+            CLIMB_MODE_CHANNEL_INDEX: CLIMB_MODE_VALUE,
+            DESCEND_FUNCTION_CHANNEL_INDEX: DESCEND_FUNCTION_VALUE,
+            CLIMB_TRIGGER_CHANNEL_INDEX: CLIMB_TRIGGER_ARM_VALUE,
+        }
         arm_deadline = tools.time.time() + float(trigger_arm_sec)
         while tools.time.time() < arm_deadline:
             arm_channels = set_channel_values(sender, channel_values=arm_channel_values)
             tools.time.sleep(loop_interval_sec)
 
-        fire_channel_values = descend_channel_values(DESCEND_TRIGGER_FIRE_VALUE)
+        fire_channel_values = {
+            CLIMB_TRIGGER_CHANNEL_INDEX: CLIMB_TRIGGER_FIRE_VALUE,
+        }
         fire_deadline = tools.time.time() + float(trigger_hold_sec)
         while tools.time.time() < fire_deadline:
             fire_channels = set_channel_values(sender, channel_values=fire_channel_values)
             tools.time.sleep(loop_interval_sec)
 
-        idle_channel_values = descend_channel_values(DESCEND_TRIGGER_IDLE_VALUE)
+        idle_channel_values = {
+            CLIMB_MODE_CHANNEL_INDEX: CLIMB_MODE_VALUE,
+            DESCEND_FUNCTION_CHANNEL_INDEX: CLIMB_TRIGGER_IDLE_VALUE,
+            CLIMB_TRIGGER_CHANNEL_INDEX: CLIMB_TRIGGER_IDLE_VALUE,
+        }
         idle_channels = set_channel_values(sender, channel_values=idle_channel_values)
 
     result = {

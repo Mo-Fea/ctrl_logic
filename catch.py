@@ -3,14 +3,23 @@
 import math
 import time
 
-from lib2 import module, tools
+from lib2 import module, move, position_backend, tools
 
 
 LIDAR_TYPE = 1
 ODOM_TOPIC = "/odin1/odometry_highfreq"
-WEAPON_ID = 1
+FIELD_TYPE = position_backend.FIELD_TYPE_BLUE
+WEAPON_ID = 3
 MOVE_SPEED = 300
-HOLD_AFTER_DONE_SEC = 5.0
+TARGET_YAW_DEG = -90.0
+WEAPON_APPROACH_OFFSET_Y = 1.0
+INITIAL_FORWARD_CMD = 300
+INITIAL_FORWARD_DURATION_SEC = 0.5
+WEAPON_MODE_SETTLE_SEC = 0.3
+WEAPON_GRAB_ARM_SEC = 0.3
+WEAPON_GRAB_HOLD_SEC = 1.0
+WEAPON_GRIPPER_RESET_VALUE = -100
+HOLD_AFTER_DONE_SEC = 10.0
 
 WAIT_READY_TIMEOUT_SEC = 8.0
 WAIT_READY_STABLE_FRAMES = 5
@@ -68,7 +77,12 @@ def wait_runtime_ready(position_runtime, odom_runtime):
 
 def print_weapon_debug(position_runtime, weapon_id):
     position_lib = module.get_position_lib()
-    weapon_targets = getattr(position_lib, "WEAPON_TARGETS", {})
+    get_weapon_targets = getattr(position_lib, "get_weapon_targets", None)
+    weapon_targets = (
+        get_weapon_targets()
+        if get_weapon_targets is not None
+        else getattr(position_lib, "WEAPON_TARGETS", {})
+    )
     target = weapon_targets.get(int(weapon_id))
     weapon_pose = position_runtime.get_weapon_pose()
     robot_pose = position_runtime.get_robot_pose()
@@ -107,12 +121,31 @@ def main():
     odom_runtime = None
 
     try:
-        print(f"Starting fetch_weapon test, weapon_id={WEAPON_ID}, speed={MOVE_SPEED}...")
+        print(
+            "Starting blue weapon catch test, "
+            f"weapon_id={WEAPON_ID}, speed={MOVE_SPEED}..."
+        )
+        position_backend.set_field_type(FIELD_TYPE)
+        print(f"Field type set to {position_backend.get_field_type()} (BLUE).")
         sender, _, flag_node, flag_thread, flag_stop_event = module.init(
             lidar_type=LIDAR_TYPE
         )
         position_runtime = module.start_position_thread(sender)
         odom_runtime = module.start_odometry_thread(topic=ODOM_TOPIC)
+
+        print(
+            f"Driving forward for {INITIAL_FORWARD_DURATION_SEC:.1f}s "
+            f"with ch2={INITIAL_FORWARD_CMD}..."
+        )
+        initial_forward_result = move.drive_with_channels_for_duration(
+            sender=sender,
+            duration_sec=INITIAL_FORWARD_DURATION_SEC,
+            forward_cmd=INITIAL_FORWARD_CMD,
+            brake_reverse_cmd=0,
+            brake_duration_sec=0.0,
+        )
+        print("Initial forward drive finished.")
+        print(initial_forward_result)
 
         print("Waiting for robot/weapon pose and odometry...")
         if not wait_runtime_ready(position_runtime, odom_runtime):
@@ -121,25 +154,122 @@ def main():
 
         print_weapon_debug(position_runtime, WEAPON_ID)
 
-        print(f"Executing module.fetch_weapon(weapon_id={WEAPON_ID})...")
-        weapon_result = module.fetch_weapon(
+        position_lib = module.get_position_lib()
+        get_weapon_targets = getattr(position_lib, "get_weapon_targets", None)
+        weapon_targets = (
+            get_weapon_targets()
+            if get_weapon_targets is not None
+            else getattr(position_lib, "WEAPON_TARGETS", None)
+        )
+        if weapon_targets is None:
+            raise AttributeError(
+                f"{position_lib.__name__} must define get_weapon_targets() or WEAPON_TARGETS"
+            )
+        if WEAPON_ID not in weapon_targets:
+            raise ValueError(f"weapon_id={WEAPON_ID} not in {sorted(weapon_targets)}")
+
+        weapon_x, weapon_y = weapon_targets[WEAPON_ID]
+        approach_x = float(weapon_x)
+        approach_y = float(weapon_y) + float(WEAPON_APPROACH_OFFSET_Y)
+
+        print(
+            f"Moving weapon reference to approach point "
+            f"({approach_x:.3f}, {approach_y:.3f}) "
+            f"with target_yaw={TARGET_YAW_DEG:.2f} deg..."
+        )
+        approach_result = module.move_to_des(
             sender=sender,
             position_runtime=position_runtime,
             odom_runtime=odom_runtime,
-            weapon_id=WEAPON_ID,
+            x=approach_x,
+            y=approach_y,
+            target_deg=TARGET_YAW_DEG,
             v=MOVE_SPEED,
+            reference="weapon",
         )
-        print("fetch_weapon returned:")
-        print(weapon_result)
-        print_weapon_debug(position_runtime, WEAPON_ID)
-
-        if not weapon_result or not weapon_result.get("grab_result", {}).get("completed", False):
-            print("fetch_weapon test failed before grab completed.")
+        print("approach move returned:")
+        print(approach_result)
+        if approach_result is None:
+            print("weapon approach test failed: approach move failed.")
             return
+
+        print(
+            f"Moving weapon reference to weapon target "
+            f"({float(weapon_x):.3f}, {float(weapon_y):.3f}) "
+            f"with target_yaw={TARGET_YAW_DEG:.2f} deg..."
+        )
+        target_result = module.move_to_des(
+            sender=sender,
+            position_runtime=position_runtime,
+            odom_runtime=odom_runtime,
+            x=float(weapon_x),
+            y=float(weapon_y),
+            target_deg=TARGET_YAW_DEG,
+            v=MOVE_SPEED,
+            stop_distance=0.02,
+            reference="weapon",
+        )
+        print("target move returned:")
+        print(target_result)
+        print_weapon_debug(position_runtime, WEAPON_ID)
+        if target_result is None:
+            print("weapon approach test failed: target move failed.")
+            return
+
+        print("Entering weapon mode and grabbing weapon...")
+        mode_deadline = time.time() + WEAPON_MODE_SETTLE_SEC
+        while time.time() < mode_deadline:
+            mode_channels = move.set_channel_values(
+                sender,
+                des_yaw_i16=0,
+                channel_values={
+                    1: 0,
+                    2: 0,
+                    4: WEAPON_GRIPPER_RESET_VALUE,
+                    5: 3,
+                    6: tools.SAFE_SWITCH_VALUE,
+                    7: tools.SAFE_SWITCH_VALUE,
+                },
+            )
+            time.sleep(0.02)
+
+        grab_arm_channels = move.set_channel_values(
+            sender,
+            des_yaw_i16=0,
+            channel_values={
+                1: 0,
+                2: 0,
+                4: WEAPON_GRIPPER_RESET_VALUE,
+                5: 3,
+                6: tools.SAFE_SWITCH_VALUE,
+                7: tools.SAFE_SWITCH_VALUE,
+            },
+        )
+        time.sleep(WEAPON_GRAB_ARM_SEC)
+
+        grab_fire_channels = move.set_channel_values(
+            sender,
+            des_yaw_i16=0,
+            channel_values={
+                1: 0,
+                2: 0,
+                4: 3,
+                5: 3,
+                6: tools.SAFE_SWITCH_VALUE,
+                7: tools.SAFE_SWITCH_VALUE,
+            },
+        )
+        time.sleep(WEAPON_GRAB_HOLD_SEC)
+        print("weapon grab finished.")
+        print({
+            "mode_channels": mode_channels,
+            "grab_arm_channels": grab_arm_channels,
+            "grab_fire_channels": grab_fire_channels,
+        })
 
         print(f"Holding current output for {HOLD_AFTER_DONE_SEC:.1f}s before shutdown...")
         time.sleep(HOLD_AFTER_DONE_SEC)
-        print("fetch_weapon test completed.")
+        print("weapon approach test completed.")
 
     except KeyboardInterrupt:
         print("\nStopped by user.")

@@ -3,18 +3,23 @@
 import math
 import time
 
-from lib2 import module, move, tools
+from lib2 import module, position_backend, tools
 
 
 LIDAR_TYPE = 1
+FIELD_TYPE = position_backend.FIELD_TYPE_RED
 ODOM_TOPIC = "/odin1/odometry_highfreq"
 
-WEAPON_ID = 1
 START_STAIR_ID = -1
+TARGET_STAIR_ID = 2
 START_FIXED_YAW_DEG = 0.01
-MOVE_SPEED = 600
 FINAL_DIRECTION = 1
-HOLD_AFTER_DONE_SEC = 5.0
+MOVE_SPEED = 600
+KFS_MOVE_SPEED = 600
+STAIR_MOVE_SPEED = 600
+WAIT_KFS_POST_THREAD = True
+KFS_POST_THREAD_TIMEOUT_SEC = 15.0
+HOLD_AFTER_DONE_SEC = 3.0
 
 WAIT_READY_TIMEOUT_SEC = 8.0
 WAIT_READY_STABLE_FRAMES = 5
@@ -24,7 +29,6 @@ MAX_READY_DATA_AGE_SEC = 0.25
 
 def values_are_finite(*values):
     return all(math.isfinite(float(value)) for value in values)
-
 
 def wait_runtime_ready(position_runtime, odom_runtime):
     deadline = time.time() + WAIT_READY_TIMEOUT_SEC
@@ -65,6 +69,28 @@ def wait_runtime_ready(position_runtime, odom_runtime):
     return False
 
 
+def wait_for_kfs_post_thread(fetch_result):
+    post_thread = fetch_result.get("post_suction_thread")
+    if not post_thread:
+        return None
+
+    done_event = post_thread.get("done_event")
+    thread = post_thread.get("thread")
+    result = post_thread.get("result")
+    if done_event is None:
+        return result
+
+    completed = done_event.wait(timeout=KFS_POST_THREAD_TIMEOUT_SEC)
+    if thread is not None and thread.is_alive():
+        thread.join(timeout=0.1)
+
+    return {
+        "completed_before_timeout": bool(completed),
+        "timeout_sec": float(KFS_POST_THREAD_TIMEOUT_SEC),
+        "result": result,
+    }
+
+
 def main():
     sender = None
     flag_node = None
@@ -74,7 +100,10 @@ def main():
     odom_runtime = None
 
     try:
-        print("Starting region 2 full challenge test...")
+        print("Starting suck test: move to -1, fetch KFS toward 2, then climb -1->2...")
+        position_backend.set_field_type(FIELD_TYPE)
+        print(f"Field type set to {position_backend.get_field_type()}.")
+
         sender, _, flag_node, flag_thread, flag_stop_event = module.init(
             lidar_type=LIDAR_TYPE
         )
@@ -83,30 +112,14 @@ def main():
 
         print("Waiting for robot pose and odometry...")
         if not wait_runtime_ready(position_runtime, odom_runtime):
-            print("Region 2 test failed: runtime data not ready.")
+            print("Suck test failed: runtime data not ready.")
             return
-
-        print(f"Fetching weapon {WEAPON_ID}...")
-        weapon_result = module.fetch_weapon(
-            sender=sender,
-            position_runtime=position_runtime,
-            odom_runtime=odom_runtime,
-            weapon_id=WEAPON_ID,
-            v=MOVE_SPEED,
-        )
-        print("fetch_weapon finished.")
-        print(weapon_result)
-
-        print("Resetting weapon state...")
-        reset_weapon_result = move.reset_weapon_after_fetch(sender)
-        print("weapon reset finished.")
-        print(reset_weapon_result)
 
         start_x, start_y = module.get_stair_xy(START_STAIR_ID)
         print(
             f"Moving to stair {START_STAIR_ID} "
             f"({start_x:.3f}, {start_y:.3f}) "
-            f"with fixed_yaw={START_FIXED_YAW_DEG:.2f} deg..."
+            f"with target_yaw={START_FIXED_YAW_DEG:.2f} deg..."
         )
         start_move_result = module.move_to_des(
             sender=sender,
@@ -118,25 +131,73 @@ def main():
             v=MOVE_SPEED,
         )
         if start_move_result is None:
-            print("Region 2 test failed: move to start stair failed.")
+            print("Suck test failed: move to -1 failed.")
             return
-        print("Move to start stair finished.")
+        print("Move to -1 finished.")
         print(start_move_result)
 
-        print("Executing CHALLENGE_ACTION_MATRIX...")
-        matrix_result = module.execute_action_matrix(
+        fetch_direction = tools.stair_id_to_direction(
+            START_STAIR_ID,
+            TARGET_STAIR_ID,
+        )
+        fetch_target_yaw = tools.direction_int_to_yaw_deg(fetch_direction)
+        print(
+            f"Fetching KFS from stair {START_STAIR_ID} toward {TARGET_STAIR_ID}: "
+            f"direction={fetch_direction}, target_yaw={fetch_target_yaw:.2f} deg..."
+        )
+        fetch_result = module.fetch_and_store_kfs(
             sender=sender,
             position_runtime=position_runtime,
             odom_runtime=odom_runtime,
-            action_matrix=module.CHALLENGE_ACTION_MATRIX,
-            final_direction=FINAL_DIRECTION,
+            stair_id=START_STAIR_ID,
+            direction=fetch_direction,
+            final_target_yaw_deg=fetch_target_yaw,
+            move_speed=KFS_MOVE_SPEED,
         )
-        print("Challenge action matrix finished.")
-        print(matrix_result)
+        print("fetch_and_store_kfs returned.")
+        print(fetch_result)
+        if not fetch_result.get("completed", False):
+            print("Suck test failed: KFS fetch failed.")
+            return
+
+        if WAIT_KFS_POST_THREAD:
+            print("Waiting for KFS post-suction thread before climbing...")
+            post_thread_result = wait_for_kfs_post_thread(fetch_result)
+            print("KFS post-suction wait result:")
+            print(post_thread_result)
+            if (
+                isinstance(post_thread_result, dict)
+                and not post_thread_result.get("completed_before_timeout", False)
+            ):
+                print("Suck test failed: KFS post-suction thread timed out.")
+                return
+
+        climb_direction = tools.stair_id_to_direction(
+            START_STAIR_ID,
+            TARGET_STAIR_ID,
+        )
+        climb_target_x, climb_target_y = module.get_stair_xy(TARGET_STAIR_ID)
+        print(
+            f"Climbing {START_STAIR_ID}->{TARGET_STAIR_ID}: "
+            f"direction={climb_direction}, "
+            f"target=({climb_target_x:.3f}, {climb_target_y:.3f})..."
+        )
+        climb_result = module.climb(
+            sender=sender,
+            position_runtime=position_runtime,
+            odom_runtime=odom_runtime,
+            direction1=climb_direction,
+            direction2=FINAL_DIRECTION,
+            x=climb_target_x,
+            y=climb_target_y,
+            move_speed=STAIR_MOVE_SPEED,
+        )
+        print("Climb finished.")
+        print(climb_result)
 
         print(f"Holding current output for {HOLD_AFTER_DONE_SEC:.1f}s before shutdown...")
         time.sleep(HOLD_AFTER_DONE_SEC)
-        print("Region 2 full challenge test completed.")
+        print("Suck test completed.")
 
     except KeyboardInterrupt:
         print("\nStopped by user.")

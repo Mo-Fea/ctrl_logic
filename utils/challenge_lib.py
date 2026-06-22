@@ -59,7 +59,14 @@ GRAB_ACTION_NAMES = {
     1: "抓取",
 }
 
+EXIT_ACTION_ROWS = {
+    10: [10, 13, 1, 1, 0],
+    12: [12, 15, 1, 1, 0],
+}
+ENTRY_ACTION_ROW = [-1, 2, 1, 1, 0]
+
 SCANNER_RUNNING_LOCK = threading.Lock()
+PLANNING_CONFIG_LOCK = threading.Lock()
 
 
 @dataclass
@@ -110,6 +117,17 @@ def _height_action(from_pos, to_pos):
     return 1 if (to_height - from_height) != 0 else 0
 
 
+def _append_exit_action(rows):
+    if not rows:
+        return rows
+
+    last_to_pos = int(rows[-1][1])
+    exit_row = EXIT_ACTION_ROWS.get(last_to_pos)
+    if exit_row is not None:
+        rows.append(exit_row.copy())
+    return rows
+
+
 def path_to_action_matrix(kfs, path):
     """
     将 race.plan_path() 返回路径转换成 n*5 动作矩阵。
@@ -144,13 +162,12 @@ def path_to_action_matrix(kfs, path):
                 ])
                 taken_set.add(step)
 
-            grab_action = 1 if kfs.get(step) == "R1" else 0
             rows.append([
                 current_pos,
                 step,
                 _direction_code(current_pos, step),
                 _height_action(current_pos, step),
-                grab_action,
+                0,
             ])
             current_pos = step
 
@@ -171,6 +188,7 @@ def path_to_action_matrix(kfs, path):
         else:
             raise ValueError(f"未知路径步骤：{step}")
 
+    rows = _append_exit_action(rows)
     if not rows:
         return np.zeros((0, 5), dtype=int)
     return np.array(rows, dtype=int)
@@ -183,6 +201,10 @@ def build_action_matrix_from_kfs(kfs):
     返回:
       action_matrix, path
     """
+    layout_valid, layout_message = race.validate_kfs_layout(kfs)
+    if not layout_valid:
+        raise ValueError(f"无法生成动作矩阵：{layout_message}")
+
     path = race.plan_path(kfs)
     if not path:
         raise ValueError("当前 KFS 布局下未找到可行路径")
@@ -204,8 +226,131 @@ def build_action_matrix_from_qr(qr_string):
     return action_matrix, path, kfs
 
 
+def _path_movement_cost(path):
+    """返回 race.py 0-1 BFS 使用的移动代价（夹取动作代价为 0）。"""
+    move_count = sum(isinstance(step, int) for step in path)
+    return max(0, move_count - 1)
+
+
+def build_action_matrix_with_pre_entry_pickup(qr_string):
+    """
+    根据前 1/2/3 号格的 R2-KFS 情况生成带场外预吸取行的动作矩阵。
+
+    - 前三位没有 2：将 -1->2 入口上楼行放在完整矩阵第一行。
+    - 第二位是 2：优先清除 2 号格。
+    - 否则清除 1 号或 3 号格；两者都是 2 时分别规划，选移动代价较小者。
+    - 只要前三位中 2 的数量为 1/2/3，R2 布局数和剩余抓取数都只减 1。
+    - 有场外预吸取时，预吸取行是第一行，-1->2 入口上楼行是第二行。
+
+    返回值与 build_action_matrix_from_qr() 一致：
+      action_matrix, path, effective_kfs
+    """
+    data = "" if qr_string is None else str(qr_string).strip()
+    if not is_valid_qr_payload(data):
+        raise ValueError(f"二维码内容无效: {qr_string!r}")
+
+    original_kfs = qr_to_kfs(data)
+    layout_valid, layout_message = race.validate_kfs_layout(original_kfs)
+    if not layout_valid:
+        raise ValueError(f"无法生成动作矩阵：{layout_message}")
+
+    pre_entry_r2_positions = [
+        position
+        for position, value in enumerate(data[:3], start=1)
+        if value == "2"
+    ]
+    pre_entry_r2_count = len(pre_entry_r2_positions)
+    if pre_entry_r2_count == 0:
+        action_matrix, path, effective_kfs = build_action_matrix_from_qr(data)
+        action_matrix = np.vstack((
+            np.array([ENTRY_ACTION_ROW], dtype=int),
+            action_matrix,
+        ))
+        return action_matrix, path, effective_kfs
+    if pre_entry_r2_count not in (1, 2, 3):
+        raise ValueError(
+            "前三位中 R2-KFS 数量必须是 0/1/2/3，"
+            f"当前为 {pre_entry_r2_count}"
+        )
+
+    with PLANNING_CONFIG_LOCK:
+        original_r2_count = race.R2_KFS_COUNT
+        original_required_count = race.REQUIRED_R2_PICKUP_COUNT
+        if original_r2_count <= 0:
+            raise ValueError("R2_KFS_COUNT 必须大于 0 才能执行场外预吸取")
+        if original_required_count <= 0:
+            raise ValueError(
+                "REQUIRED_R2_PICKUP_COUNT 必须大于 0 才能执行场外预吸取"
+            )
+
+        race.R2_KFS_COUNT = original_r2_count - 1
+        race.REQUIRED_R2_PICKUP_COUNT = original_required_count - 1
+
+        try:
+            candidate_positions = (
+                [2]
+                if 2 in pre_entry_r2_positions
+                else list(pre_entry_r2_positions)
+            )
+            candidate_results = []
+            candidate_errors = []
+
+            for pickup_position in candidate_positions:
+                modified_chars = list(data)
+                modified_chars[pickup_position - 1] = "0"
+                modified_data = "".join(modified_chars)
+                try:
+                    action_matrix, path, effective_kfs = build_action_matrix_from_qr(
+                        modified_data
+                    )
+                except ValueError as exc:
+                    candidate_errors.append((pickup_position, str(exc)))
+                    continue
+
+                candidate_results.append({
+                    "pickup_position": int(pickup_position),
+                    "movement_cost": int(_path_movement_cost(path)),
+                    "action_matrix": action_matrix,
+                    "path": path,
+                    "effective_kfs": effective_kfs,
+                })
+
+            if not candidate_results:
+                error_text = "; ".join(
+                    f"{position}号格: {message}"
+                    for position, message in candidate_errors
+                )
+                raise ValueError(
+                    "前三位 R2-KFS 场外预吸取后均无可行路径"
+                    + (f": {error_text}" if error_text else "")
+                )
+
+            # 相同移动代价时保留 candidate_positions 的先后顺序，即1号优先于3号。
+            selected = min(
+                candidate_results,
+                key=lambda result: result["movement_cost"],
+            )
+            pickup_position = selected["pickup_position"]
+            pre_entry_rows = np.array(
+                [
+                    [-1, pickup_position, 1, 0, 1],
+                    ENTRY_ACTION_ROW,
+                ],
+                dtype=int,
+            )
+            action_matrix = np.vstack(
+                (pre_entry_rows, selected["action_matrix"])
+            )
+            return action_matrix, selected["path"], selected["effective_kfs"]
+        except Exception:
+            # 规划失败后扫码线程可能继续重试，必须避免再次减 1。
+            race.R2_KFS_COUNT = original_r2_count
+            race.REQUIRED_R2_PICKUP_COUNT = original_required_count
+            raise
+
+
 def build_plan_result_from_qr(qr_string):
-    action_matrix, path, kfs = build_action_matrix_from_qr(qr_string)
+    action_matrix, path, kfs = build_action_matrix_with_pre_entry_pickup(qr_string)
     return ChallengePlanResult(
         qr_data=str(qr_string).strip(),
         kfs=kfs,

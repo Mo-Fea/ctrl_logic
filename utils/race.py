@@ -1,5 +1,7 @@
 import random
+from collections.abc import Mapping
 from collections import deque
+from lib2 import position_backend
 
 
 def _import_matplotlib():
@@ -13,12 +15,12 @@ def _import_matplotlib():
 
 # ============================================
 # 规则说明：
-# 1. 2个R1的武术秘籍(R1KFS)由对方参赛队员放置在树林边靠近通道的任何方块上
-# 2. 2个R2的武术秘籍(R2KFS)由对方参赛队员放置在树林内的任何空置方块上
-# 3. 1个假KFS由对方参赛队员放置在树林内任何空置的方块上，但不得放在靠近入口
+# 1. R1/R2/Fake 的场上数量由下方全局变量配置
+# 2. 随机测试布局中，R1 放在允许区域，R2/Fake 放在树林内空位
+# 3. 二维码布局只统一校验类型和数量，摆放区域规则由后续赛事逻辑处理
 # 4. R2必须从2号进入场地
 # 5. (x_index, y_index, height) 最后一位是高度，R2上下的高度差只能是20
-# 6. R2拿一个R2-KFS，R1全拿
+# 6. R2 必须拿取的数量由 REQUIRED_R2_PICKUP_COUNT 配置
 # 7. R1，R2都不能碰假的（fake）kfs
 # 8. R2在梅林里上下台阶的时候要保证下一个台阶上无KFS，如果有要抓取，但是只能抓取R2能够抓取的
 # 9. R1的KSF只能由R1自己抓取，如果R1的ksf挡住R2的路，则R1把R1的1kfs拿开让R2前进
@@ -37,19 +39,61 @@ def _import_matplotlib():
 #
 # 地图布局：
 #          x=0      x=1      x=2      x=3
-# y=2:    [1:40]   [4:20]   [7:40]   [10:20]   ← 10号出口侧
+# y=2:    [1:40]   [4:60]   [7:40]   [10:20]   ← 10号出口侧
 # y=1:    [2:20]   [5:40]   [8:60]   [11:40]   ← 入口在2号
-# y=0:    [3:40]   [6:60]   [9:40]   [12:20]   ← 12号出口侧
+# y=0:    [3:40]   [6:20]   [9:40]   [12:20]   ← 12号出口侧
 
-max_get_R2 = 1  # R2只需要拿1个R2-KFS
+# 赛事数量配置：比赛模式 1 为 2R1/2R2/1Fake，模式 2 为 3R1/3R2/1Fake。
+# REQUIRED_R2_PICKUP_COUNT 独立表示 R2 完成路径前必须拿到的数量。
+COMPETITION_KFS_COUNT_PROFILES = {
+    1: (2, 2, 1),
+    2: (3, 3, 1),
+}
+COMPETITION_MODE = 1
+R1_KFS_COUNT, R2_KFS_COUNT, FAKE_KFS_COUNT = COMPETITION_KFS_COUNT_PROFILES[
+    COMPETITION_MODE
+]
+REQUIRED_R2_PICKUP_COUNT = 2
 
-pos_to_coord = {
+
+def configure_competition_mode(mode):
+    """
+    切换比赛例程对应的 KFS 数量配置。
+
+    mode=1: 2个 R1-KFS、2个 R2-KFS、1个 Fake-KFS
+    mode=2: 3个 R1-KFS、3个 R2-KFS、1个 Fake-KFS
+
+    本函数不修改 REQUIRED_R2_PICKUP_COUNT。
+    """
+    if not isinstance(mode, int) or isinstance(mode, bool):
+        raise ValueError(f"competition mode 必须是整数 1 或 2，当前为 {mode!r}")
+    if mode not in COMPETITION_KFS_COUNT_PROFILES:
+        raise ValueError(f"competition mode 必须是 1 或 2，当前为 {mode}")
+
+    global COMPETITION_MODE
+    global R1_KFS_COUNT, R2_KFS_COUNT, FAKE_KFS_COUNT
+
+    r1_count, r2_count, fake_count = COMPETITION_KFS_COUNT_PROFILES[mode]
+    COMPETITION_MODE = mode
+    R1_KFS_COUNT = r1_count
+    R2_KFS_COUNT = r2_count
+    FAKE_KFS_COUNT = fake_count
+
+    return {
+        "competition_mode": COMPETITION_MODE,
+        "r1_kfs_count": R1_KFS_COUNT,
+        "r2_kfs_count": R2_KFS_COUNT,
+        "fake_kfs_count": FAKE_KFS_COUNT,
+        "required_r2_pickup_count": REQUIRED_R2_PICKUP_COUNT,
+    }
+
+POS_TO_COORD_RED = {
     1: (0, 2, 40),
     2: (0, 1, 20),   # 入口位置
     3: (0, 0, 40),
-    4: (1, 2, 20),
+    4: (1, 2, 60),
     5: (1, 1, 40),
-    6: (1, 0, 60),
+    6: (1, 0, 20),
     7: (2, 2, 40),
     8: (2, 1, 60),
     9: (2, 0, 40),
@@ -58,7 +102,89 @@ pos_to_coord = {
     12: (3, 0, 20)   # 12号出口侧
 }
 
-coord_to_pos = {v: k for k, v in pos_to_coord.items()}
+
+
+POS_TO_COORD_BLUE = {
+    # Left field placeholders. Fill these with measured/logical coordinates if needed.
+    1: (0, 0, 40),
+    2: (0, 1, 20),   # 入口位置
+    3: (0, 2, 40),
+    4: (1, 0, 60),
+    5: (1, 1, 40),
+    6: (1, 2, 20),
+    7: (2, 0, 40),
+    8: (2, 1, 60),
+    9: (2, 2, 40),
+    10: (3, 0, 20),  # 10号出口侧
+    11: (3, 1, 40),
+    12: (3, 2, 20)   # 12号出口侧
+}
+
+
+def get_pos_to_coord():
+    if position_backend.is_blue_field():
+        return POS_TO_COORD_BLUE
+    return POS_TO_COORD_RED
+
+
+def get_coord_to_pos():
+    return {coord: pos for pos, coord in get_pos_to_coord().items()}
+
+
+class _FieldMapping(Mapping):
+    def _mapping(self):
+        return get_pos_to_coord()
+
+    def __getitem__(self, key):
+        return self._mapping()[key]
+
+    def __iter__(self):
+        return iter(self._mapping())
+
+    def __len__(self):
+        return len(self._mapping())
+
+    def __contains__(self, key):
+        return key in self._mapping()
+
+    def items(self):
+        return self._mapping().items()
+
+    def keys(self):
+        return self._mapping().keys()
+
+    def values(self):
+        return self._mapping().values()
+
+
+class _CoordToPosMapping(Mapping):
+    def _mapping(self):
+        return get_coord_to_pos()
+
+    def __getitem__(self, key):
+        return self._mapping()[key]
+
+    def __iter__(self):
+        return iter(self._mapping())
+
+    def __len__(self):
+        return len(self._mapping())
+
+    def __contains__(self, key):
+        return key in self._mapping()
+
+    def items(self):
+        return self._mapping().items()
+
+    def keys(self):
+        return self._mapping().keys()
+
+    def values(self):
+        return self._mapping().values()
+
+
+pos_to_coord = _FieldMapping()
+coord_to_pos = _CoordToPosMapping()
 
 GRID_X_COUNT = 4
 GRID_Y_COUNT = 3
@@ -69,6 +195,80 @@ EXIT_POSITIONS = [10, 12]  # R2从10号或12号位置出口侧离开
 INTERIOR_POS = [4, 5, 6, 7, 8, 9]
 # 树林边靠近通道的位置（R1-KFS放置区域）
 R1_ALLOWED_POS = [1, 2, 3, 4, 6, 7, 9, 10, 11, 12]
+
+KFS_TYPES = ("R1", "R2", "low")
+
+
+def validate_kfs_count_config():
+    """校验顶部的 KFS 数量配置。"""
+    count_config = {
+        "R1_KFS_COUNT": R1_KFS_COUNT,
+        "R2_KFS_COUNT": R2_KFS_COUNT,
+        "FAKE_KFS_COUNT": FAKE_KFS_COUNT,
+        "REQUIRED_R2_PICKUP_COUNT": REQUIRED_R2_PICKUP_COUNT,
+    }
+    for name, value in count_config.items():
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            return False, f"{name} 必须是非负整数，当前为 {value!r}"
+
+    if REQUIRED_R2_PICKUP_COUNT > R2_KFS_COUNT:
+        return False, (
+            "REQUIRED_R2_PICKUP_COUNT 不能大于 R2_KFS_COUNT："
+            f"{REQUIRED_R2_PICKUP_COUNT} > {R2_KFS_COUNT}"
+        )
+
+    total_count = R1_KFS_COUNT + R2_KFS_COUNT + FAKE_KFS_COUNT
+    if total_count > len(pos_to_coord):
+        return False, f"KFS 总数 {total_count} 超过场地格子数 {len(pos_to_coord)}"
+
+    return True, "KFS 数量配置合法"
+
+
+def validate_kfs_layout(kfs):
+    """
+    校验 KFS 布局的类型和数量。
+
+    本函数只校验数量，不限制 R1/R2/Fake 的摆放区域，
+    因此可以接受前 1/2/3 号格出现 R2-KFS 的新赛事布局。
+    """
+    config_valid, config_message = validate_kfs_count_config()
+    if not config_valid:
+        return False, config_message
+    if not isinstance(kfs, Mapping):
+        return False, f"kfs 必须是映射类型，当前为 {type(kfs).__name__}"
+
+    valid_positions = set(pos_to_coord.keys())
+    extra_positions = sorted(position for position in kfs if position not in valid_positions)
+    if extra_positions:
+        return False, f"KFS 布局包含无效格子编号: {extra_positions}"
+
+    invalid_values = {
+        position: kfs.get(position)
+        for position in valid_positions
+        if kfs.get(position) not in (None, *KFS_TYPES)
+    }
+    if invalid_values:
+        return False, f"KFS 布局包含无效类型: {invalid_values}"
+
+    actual_counts = {
+        "R1": sum(kfs.get(position) == "R1" for position in valid_positions),
+        "R2": sum(kfs.get(position) == "R2" for position in valid_positions),
+        "low": sum(kfs.get(position) == "low" for position in valid_positions),
+    }
+    expected_counts = {
+        "R1": R1_KFS_COUNT,
+        "R2": R2_KFS_COUNT,
+        "low": FAKE_KFS_COUNT,
+    }
+    mismatches = [
+        f"{kfs_type}={actual_counts[kfs_type]}(应为{expected_counts[kfs_type]})"
+        for kfs_type in KFS_TYPES
+        if actual_counts[kfs_type] != expected_counts[kfs_type]
+    ]
+    if mismatches:
+        return False, "KFS 数量不符合当前配置: " + ", ".join(mismatches)
+
+    return True, f"KFS 布局数量校验通过: {actual_counts}"
 
 
 def get_grid_neighbors(pos):
@@ -120,8 +320,8 @@ def can_move_to(current_pos, next_pos, kfs, taken_count, taken_set):
         if next_pos in taken_set:
             return True, "通过（R2-KFS已夹取）"
         # 检查是否已经拿满
-        if taken_count >= max_get_R2:
-            return False, f"已拿满{max_get_R2}个R2-KFS，无法再抓取"
+        if taken_count >= REQUIRED_R2_PICKUP_COUNT:
+            return False, f"已拿满{REQUIRED_R2_PICKUP_COUNT}个R2-KFS，无法再抓取"
         # 可以踩踏抓取
         return True, "抓取R2-KFS"
 
@@ -135,7 +335,7 @@ def can_reach_to(current_pos, target_pos, kfs, taken_count, taken_set):
     条件：
     - 目标位置与当前位置网格相邻
     - 目标位置有R2-KFS且尚未被抓取
-    - 抓取后不超过max_get_R2限制
+    - 抓取后不超过 REQUIRED_R2_PICKUP_COUNT 限制
     """
     # 检查是否网格相邻
     if target_pos not in get_grid_neighbors(current_pos):
@@ -150,8 +350,8 @@ def can_reach_to(current_pos, target_pos, kfs, taken_count, taken_set):
         return False, "R2-KFS已被抓取"
 
     # 检查是否超过限制
-    if taken_count >= max_get_R2:
-        return False, f"已拿满{max_get_R2}个R2-KFS"
+    if taken_count >= REQUIRED_R2_PICKUP_COUNT:
+        return False, f"已拿满{REQUIRED_R2_PICKUP_COUNT}个R2-KFS"
 
     return True, "夹取R2-KFS"
 
@@ -160,28 +360,69 @@ def generate_kfs():
     """
     生成KFS的随机放置
     遵循规则：
-    - 2个R1的KFS放在树林边靠近通道的位置 {1,2,3,4,6,7,9,10,11,12} 中随机选2个
-    - 2个R2的KFS放在树林内的空置方块
-    - 1个假KFS放在树林内但不在入口附近（不在1,2,3）
+    - R1_KFS_COUNT 个 R1-KFS 放在 R1_ALLOWED_POS 中
+    - R2_KFS_COUNT 个 R2-KFS 放在树林内的空置方块
+    - FAKE_KFS_COUNT 个假 KFS 放在树林内剩余空位
     """
+    config_valid, config_message = validate_kfs_count_config()
+    if not config_valid:
+        raise ValueError(config_message)
+
     kfs = {p: None for p in range(1, 13)}
 
-    # 2个R1的KFS放在树林边靠近通道的位置 {1,2,3,4,6,7,9,10,11,12} 中随机选2个
-    r1_positions = random.sample(R1_ALLOWED_POS, 2)
+    if R1_KFS_COUNT > len(R1_ALLOWED_POS):
+        raise ValueError(
+            f"R1_KFS_COUNT={R1_KFS_COUNT} 超过 R1 可摆放位置数 {len(R1_ALLOWED_POS)}"
+        )
+
+    # R1 也可能占用树林内格子。先限制其占用数，避免数量配置本身可行，
+    # 但随机到某个 R1 布局后没有足够空位放置 R2/Fake。
+    r1_interior_allowed = [p for p in R1_ALLOWED_POS if p in INTERIOR_POS]
+    r1_exterior_allowed = [p for p in R1_ALLOWED_POS if p not in INTERIOR_POS]
+    required_interior_free = R2_KFS_COUNT + FAKE_KFS_COUNT
+    max_r1_interior_count = min(
+        R1_KFS_COUNT,
+        len(r1_interior_allowed),
+        len(INTERIOR_POS) - required_interior_free,
+    )
+    min_r1_interior_count = max(0, R1_KFS_COUNT - len(r1_exterior_allowed))
+    if max_r1_interior_count < min_r1_interior_count:
+        raise ValueError(
+            "当前数量与随机摆放区域冲突："
+            f"R1={R1_KFS_COUNT}, R2={R2_KFS_COUNT}, Fake={FAKE_KFS_COUNT}"
+        )
+
+    r1_interior_count = random.randint(
+        min_r1_interior_count,
+        max_r1_interior_count,
+    )
+    r1_positions = (
+        random.sample(r1_interior_allowed, r1_interior_count)
+        + random.sample(
+            r1_exterior_allowed,
+            R1_KFS_COUNT - r1_interior_count,
+        )
+    )
     for p in r1_positions:
         kfs[p] = 'R1'
 
-    # 2个R2的KFS放在树林内的空置方块
     remaining = [p for p in INTERIOR_POS if kfs[p] is None]
-    r2_positions = random.sample(remaining, 2)
+    if R2_KFS_COUNT > len(remaining):
+        raise ValueError(
+            f"R2_KFS_COUNT={R2_KFS_COUNT} 超过当前树林内空位数 {len(remaining)}"
+        )
+    r2_positions = random.sample(remaining, R2_KFS_COUNT)
     for p in r2_positions:
         kfs[p] = 'R2'
 
-    # 1个假KFS放在树林内但不在入口附近（不在1,2,3）
     remaining = [p for p in INTERIOR_POS if kfs[p] is None]
-    if remaining:
-        low_pos = random.choice(remaining)
-        kfs[low_pos] = 'low'
+    if FAKE_KFS_COUNT > len(remaining):
+        raise ValueError(
+            f"FAKE_KFS_COUNT={FAKE_KFS_COUNT} 超过当前树林内空位数 {len(remaining)}"
+        )
+    fake_positions = random.sample(remaining, FAKE_KFS_COUNT)
+    for p in fake_positions:
+        kfs[p] = 'low'
 
     return kfs, r2_positions
 
@@ -197,6 +438,10 @@ def plan_path(kfs):
     夹取动作不增加路径步数，移动动作增加1步。
     0-1 BFS保证找到移动步数最少的路径。
     """
+    layout_valid, layout_message = validate_kfs_layout(kfs)
+    if not layout_valid:
+        raise ValueError(layout_message)
+
     # 初始化
     initial_taken_set = set()
     initial_taken_count = 0
@@ -231,7 +476,7 @@ def plan_path(kfs):
             continue
 
         # 到达出口且已拿满
-        if current_pos in EXIT_POSITIONS and taken_count == max_get_R2:
+        if current_pos in EXIT_POSITIONS and taken_count == REQUIRED_R2_PICKUP_COUNT:
             if cost < best_path_cost:
                 best_path_cost = cost
                 best_path = path.copy()
@@ -340,7 +585,7 @@ def get_action_sequence(kfs, path):
                     taken_count += 1
                     actions.append(
                         f"【入口】进入位置{pos} ({height_label}) → 发现R2-KFS，抓取！"
-                        f"（已抓取 {taken_count}/{max_get_R2}）"
+                        f"（已抓取 {taken_count}/{REQUIRED_R2_PICKUP_COUNT}）"
                     )
                 else:
                     actions.append(f"【入口】进入位置{pos} ({height_label})")
@@ -360,7 +605,7 @@ def get_action_sequence(kfs, path):
                     taken_count += 1
                     actions.append(
                         f"移动: {prev_pos}→{pos} ({direction}台阶, {height_label})"
-                        f" → 踩踏抓取R2-KFS！（已抓取 {taken_count}/{max_get_R2}）"
+                        f" → 踩踏抓取R2-KFS！（已抓取 {taken_count}/{REQUIRED_R2_PICKUP_COUNT}）"
                     )
                 elif kfs_type == 'R1':
                     actions.append(
@@ -382,7 +627,7 @@ def get_action_sequence(kfs, path):
             move_positions = get_move_positions(path)
             if pos in EXIT_POSITIONS and pos == move_positions[-1]:
                 actions.append(
-                    f"【出口】从位置{pos}离开场地（共抓取 {taken_count}/{max_get_R2} 个R2-KFS）"
+                    f"【出口】从位置{pos}离开场地（共抓取 {taken_count}/{REQUIRED_R2_PICKUP_COUNT} 个R2-KFS）"
                 )
 
         elif isinstance(step, tuple) and step[1] == 'reach':
@@ -390,7 +635,7 @@ def get_action_sequence(kfs, path):
             taken_count += 1
             actions.append(
                 f"夹取: 在位置{from_pos}夹取位置{to_pos}的R2-KFS！"
-                f"（不移动到目标位置，已抓取 {taken_count}/{max_get_R2}）"
+                f"（不移动到目标位置，已抓取 {taken_count}/{REQUIRED_R2_PICKUP_COUNT}）"
             )
 
     return actions
@@ -398,7 +643,14 @@ def get_action_sequence(kfs, path):
 
 def visualize(kfs, path=None):
     """可视化KFS放置和R2路径（白色=移动，蓝色虚线=夹取）"""
-    plt, patches = _import_matplotlib()
+    try:
+        plt, patches = _import_matplotlib()
+    except (ImportError, AttributeError) as exc:
+        filename = save_visualization_svg(kfs, path)
+        print(f"[警告]: matplotlib 不可用，已改为生成 SVG: {filename}")
+        print(f"[原因]: {exc}")
+        return filename
+
     fig, ax = plt.subplots(figsize=(10, 7))
     ax.set_xlim(-1.3, 4.3)
     ax.set_ylim(-0.8, 2.8)
@@ -550,7 +802,7 @@ def visualize(kfs, path=None):
 
     reach_count = len(get_reach_actions(path)) if path else 0
     ax.set_title("崇武探幽 - R2最短路径规划\n"
-                 f"（从位置2进入，抓取{max_get_R2}个R2-KFS，从10/12出口侧离开）\n"
+                 f"（从位置2进入，抓取{REQUIRED_R2_PICKUP_COUNT}个R2-KFS，从10/12出口侧离开）\n"
                  f"白色线=移动  蓝色虚线=夹取(共{reach_count}次)",
                  fontsize=13, pad=15)
     ax.set_xticks([0, 1, 2, 3])
@@ -561,6 +813,160 @@ def visualize(kfs, path=None):
 
     plt.tight_layout()
     plt.show()
+
+
+def save_visualization_svg(kfs, path=None, filename="race_visualization.svg"):
+    """不依赖 matplotlib 的 SVG 路线图输出。"""
+    width = 760
+    height = 560
+    margin_left = 110
+    margin_top = 90
+    cell = 105
+
+    def sx(x):
+        return margin_left + float(x) * cell
+
+    def sy(y):
+        return margin_top + (GRID_Y_COUNT - 1 - float(y)) * cell
+
+    def esc(value):
+        return (
+            str(value)
+            .replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+            .replace('"', "&quot;")
+        )
+
+    height_color = {
+        20: "#006400",
+        40: "#228B22",
+        60: "#90EE90",
+        0: "#d8d8d8",
+    }
+    kfs_color = {"R1": "#a8d8ff", "R2": "#ff6666", "low": "#ffff66"}
+    kfs_edge = {"R1": "#4488cc", "R2": "#cc3333", "low": "#cccc33"}
+    kfs_label = {"R1": "R1", "R2": "R2", "low": "假"}
+
+    lines = [
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}">',
+        '<rect width="100%" height="100%" fill="#f3f4f6"/>',
+        '<text x="30" y="34" font-size="22" font-family="sans-serif" font-weight="700" fill="#111827">R2 路径规划图</text>',
+        '<text x="30" y="58" font-size="13" font-family="sans-serif" fill="#374151">白线=移动路径，蓝色虚线=夹取路径</text>',
+    ]
+
+    for pos, (x, y, h) in sorted(pos_to_coord.items()):
+        px = sx(x)
+        py = sy(y)
+        fill = height_color.get(h, "#ffffff")
+        lines.append(
+            f'<rect x="{px - cell / 2:.1f}" y="{py - cell / 2:.1f}" width="{cell}" height="{cell}" '
+            f'fill="{fill}" stroke="#111827" stroke-width="2"/>'
+        )
+        name = str(pos)
+        if pos == ENTRY_POS:
+            name = f"{pos} 入口"
+        elif pos in EXIT_POSITIONS:
+            name = f"{pos} 出口"
+        text_fill = "#111827" if h == 60 or h == 0 else "#ffffff"
+        lines.append(
+            f'<text x="{px:.1f}" y="{py - 7:.1f}" font-size="18" font-family="sans-serif" '
+            f'font-weight="700" text-anchor="middle" fill="{text_fill}">{esc(name)}</text>'
+        )
+        lines.append(
+            f'<text x="{px:.1f}" y="{py + 20:.1f}" font-size="13" font-family="sans-serif" '
+            f'text-anchor="middle" fill="{text_fill}">h={esc(h)}</text>'
+        )
+
+    # 入口和出口箭头。
+    entry_x, entry_y, _ = pos_to_coord[ENTRY_POS]
+    epx = sx(entry_x)
+    epy = sy(entry_y)
+    lines.append('<defs><marker id="arrow-red" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth"><path d="M0,0 L0,6 L9,3 z" fill="#dc2626"/></marker><marker id="arrow-blue" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth"><path d="M0,0 L0,6 L9,3 z" fill="#2563eb"/></marker></defs>')
+    lines.append(
+        f'<line x1="{epx - 95:.1f}" y1="{epy:.1f}" x2="{epx - 58:.1f}" y2="{epy:.1f}" '
+        'stroke="#dc2626" stroke-width="4" marker-end="url(#arrow-red)"/>'
+    )
+    for exit_pos in EXIT_POSITIONS:
+        ex, ey, _ = pos_to_coord[exit_pos]
+        px = sx(ex)
+        py = sy(ey)
+        lines.append(
+            f'<line x1="{px + 58:.1f}" y1="{py:.1f}" x2="{px + 95:.1f}" y2="{py:.1f}" '
+            'stroke="#2563eb" stroke-width="4" marker-end="url(#arrow-blue)"/>'
+        )
+
+    if path:
+        move_positions = get_move_positions(path)
+        reach_actions = get_reach_actions(path)
+        if len(move_positions) >= 2:
+            points = []
+            for step in move_positions:
+                x, y, _ = pos_to_coord[step]
+                points.append(f"{sx(x):.1f},{sy(y):.1f}")
+            lines.append(
+                f'<polyline points="{" ".join(points)}" fill="none" stroke="#ffffff" '
+                'stroke-width="9" stroke-linecap="round" stroke-linejoin="round" opacity="0.95"/>'
+            )
+        for from_pos, _, to_pos in reach_actions:
+            fx, fy, _ = pos_to_coord[from_pos]
+            tx, ty, _ = pos_to_coord[to_pos]
+            lines.append(
+                f'<line x1="{sx(fx):.1f}" y1="{sy(fy):.1f}" x2="{sx(tx):.1f}" y2="{sy(ty):.1f}" '
+                'stroke="#4488ff" stroke-width="5" stroke-dasharray="10 8" stroke-linecap="round"/>'
+            )
+            lines.append(
+                f'<rect x="{sx(tx) - 9:.1f}" y="{sy(ty) - 9:.1f}" width="18" height="18" '
+                'fill="#4488ff" stroke="#ffffff" stroke-width="2" transform="rotate(45 '
+                f'{sx(tx):.1f} {sy(ty):.1f})"/>'
+            )
+        for index, step in enumerate(move_positions):
+            x, y, _ = pos_to_coord[step]
+            label = "S" if index == 0 else ("E" if index == len(move_positions) - 1 else str(index))
+            lines.append(
+                f'<circle cx="{sx(x):.1f}" cy="{sy(y):.1f}" r="17" fill="#ffffff" stroke="#14532d" stroke-width="2"/>'
+            )
+            lines.append(
+                f'<text x="{sx(x):.1f}" y="{sy(y) + 5:.1f}" font-size="14" font-family="sans-serif" '
+                f'font-weight="700" text-anchor="middle" fill="#14532d">{esc(label)}</text>'
+            )
+
+    for pos, typ in sorted(kfs.items()):
+        if typ is None or pos not in pos_to_coord:
+            continue
+        x, y, _ = pos_to_coord[pos]
+        px = sx(x)
+        py = sy(y)
+        lines.append(
+            f'<circle cx="{px:.1f}" cy="{py:.1f}" r="25" fill="{kfs_color.get(typ, "#ffffff")}" '
+            f'stroke="{kfs_edge.get(typ, "#111827")}" stroke-width="3" opacity="0.9"/>'
+        )
+        lines.append(
+            f'<text x="{px:.1f}" y="{py + 5:.1f}" font-size="16" font-family="sans-serif" '
+            f'font-weight="700" text-anchor="middle" fill="#111827">{esc(kfs_label.get(typ, typ))}</text>'
+        )
+
+    legend_y = height - 92
+    legend_items = [
+        ("#006400", "h=20"),
+        ("#228B22", "h=40"),
+        ("#90EE90", "h=60"),
+        ("#d8d8d8", "h=0/不可走"),
+        ("#ff6666", "R2"),
+        ("#a8d8ff", "R1"),
+        ("#ffff66", "假"),
+    ]
+    for index, (color, label) in enumerate(legend_items):
+        x = 30 + index * 100
+        lines.append(f'<rect x="{x}" y="{legend_y}" width="18" height="18" fill="{color}" stroke="#111827"/>')
+        lines.append(
+            f'<text x="{x + 24}" y="{legend_y + 14}" font-size="13" font-family="sans-serif" fill="#111827">{esc(label)}</text>'
+        )
+
+    lines.append("</svg>")
+    with open(filename, "w", encoding="utf-8") as fp:
+        fp.write("\n".join(lines))
+    return filename
 
 
 def count_steps(path):
@@ -586,6 +992,10 @@ def count_steps(path):
 
 def validate_path(kfs, path):
     """验证路径是否满足所有规则（包括夹取动作）"""
+    layout_valid, layout_message = validate_kfs_layout(kfs)
+    if not layout_valid:
+        return False, layout_message
+
     if not path:
         return False, "路径为空"
 
@@ -643,8 +1053,8 @@ def validate_path(kfs, path):
         return False, f"终点必须是位置{EXIT_POSITIONS}之一，当前在{current_pos}"
 
     # 检查抓取数量
-    if taken_count != max_get_R2:
-        return False, (f"必须抓取{max_get_R2}个R2-KFS，"
+    if taken_count != REQUIRED_R2_PICKUP_COUNT:
+        return False, (f"必须抓取{REQUIRED_R2_PICKUP_COUNT}个R2-KFS，"
                        f"实际抓取了{taken_count}个")
 
     return True, "路径验证通过 ✓"

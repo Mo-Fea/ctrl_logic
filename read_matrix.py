@@ -69,7 +69,7 @@ def print_kfs_fetch_plan(
         print("       低位微调: 按台阶坐标和 adjust_distance 计算目标点后 move_to_des")
     _print_step(
         3,
-        f"机械臂到抓取姿态: control_kfs_pose(pose_id={pose_id}, {pose_name}, suction_ch4=1)",
+        f"机械臂到抓取姿态: kfs.kfs_grab_pose(pose_id={pose_id}, {pose_name})",
     )
     _print_step(
         4,
@@ -81,7 +81,7 @@ def print_kfs_fetch_plan(
     )
     _print_step(
         6,
-        "阻塞后续机械臂: pose_id=3 -> pose_id=4 -> 释放吸盘 -> 回0态 -> 复位KFS通道",
+        "异步后续机械臂: pose_id=3 -> 旋转双头吸盘 -> pose_id=0 -> 复位KFS通道",
     )
     if next_height_action == 1:
         next_direction = tools.stair_id_to_direction(

@@ -8,23 +8,80 @@ from rclpy.executors import ExternalShutdownException, SingleThreadedExecutor
 from tf2_msgs.msg import TFMessage
 import math
 
+from lib2 import position_backend
 
-ENTRANCE_X = 0.565
-ENTRANCE_Y = -1.817
-PRE_ENTRANCE_X = -0.500
-PRE_ENTRANCE_Y = -1.776
-WEAPON_TARGETS = {
-    1: (-2.22, 1.31),
-    2: (-2.01, 1.32),
-    3: (-1.82, 1.33),
-    4: (-1.61, 1.33),
-    5: (-1.418, 1.33),
-    6: (-1.22, 1.34),
+
+ENTRANCE_X_RED = 0.587
+ENTRANCE_Y_RED = -1.725
+PRE_ENTRANCE_X_RED = -0.500
+PRE_ENTRANCE_Y_RED = -1.776
+WEAPON_TARGETS_RED = {
+    1: (-2.176, 1.120),
+    2: (-1.998, 1.122),
+    3: (-1.784, 1.116),
+    4: (-1.588, 1.110),
+    5: (-1.378, 1.113),
+    6: (-1.723, 1.150),
 }
-WEAPON_RETREAT_STOP_Y = 4.00
+WEAPON_RETREAT_STOP_Y_RED = 4.00
 
-LIDAR_TO_BASE_X = - 0.227  # m
-LIDAR_TO_BASE_Y = - 0.266
+
+# Left field placeholders. Fill these with measured coordinates from the real field.
+ENTRANCE_X_BLUE = 0.55
+ENTRANCE_Y_BLUE = 1.55
+PRE_ENTRANCE_X_BLUE = -0.500
+PRE_ENTRANCE_Y_BLUE = 1.776
+WEAPON_TARGETS_BLUE = {
+    1: (-1.840, -1.312),
+    2: (-1.902, -1.342),
+    3: (-2.265, -1.33),
+    4: (-2.191, -1.150),
+    5: (-1.996, -1.150),
+    6: (-1.793, -1.150),
+}
+WEAPON_RETREAT_STOP_Y_BLUE = -4.00
+
+
+# Backward-compatible defaults: current main flow still uses red/right field.
+ENTRANCE_X = ENTRANCE_X_RED
+ENTRANCE_Y = ENTRANCE_Y_RED
+PRE_ENTRANCE_X = PRE_ENTRANCE_X_RED
+PRE_ENTRANCE_Y = PRE_ENTRANCE_Y_RED
+WEAPON_TARGETS = WEAPON_TARGETS_RED
+WEAPON_RETREAT_STOP_Y = WEAPON_RETREAT_STOP_Y_RED
+
+
+def _select_field_value(red_value, blue_value):
+    if position_backend.is_blue_field():
+        return blue_value
+    return red_value
+
+
+def get_entrance_x():
+    return float(_select_field_value(ENTRANCE_X_RED, ENTRANCE_X_BLUE))
+
+
+def get_entrance_y():
+    return float(_select_field_value(ENTRANCE_Y_RED, ENTRANCE_Y_BLUE))
+
+
+def get_pre_entrance_x():
+    return float(_select_field_value(PRE_ENTRANCE_X_RED, PRE_ENTRANCE_X_BLUE))
+
+
+def get_pre_entrance_y():
+    return float(_select_field_value(PRE_ENTRANCE_Y_RED, PRE_ENTRANCE_Y_BLUE))
+
+
+def get_weapon_targets():
+    return dict(_select_field_value(WEAPON_TARGETS_RED, WEAPON_TARGETS_BLUE))
+
+
+def get_weapon_retreat_stop_y():
+    return float(_select_field_value(WEAPON_RETREAT_STOP_Y_RED, WEAPON_RETREAT_STOP_Y_BLUE))
+
+LIDAR_TO_BASE_X = - 0.236  # m
+LIDAR_TO_BASE_Y = - 0.206  # m  
 LIDAR_TO_BASE_Z = 0.0
 T_LIDAR_TO_BASE = np.array([
     [1.0, 0.0, 0.0, LIDAR_TO_BASE_X],
@@ -34,8 +91,8 @@ T_LIDAR_TO_BASE = np.array([
 ], dtype=float)
 
 
-LIDAR_TO_WEAPON_X = 0.107  # m
-LIDAR_TO_WEAPON_Y = -0.446  # m
+LIDAR_TO_WEAPON_X = -0.730  # m
+LIDAR_TO_WEAPON_Y = -0.206  # m
 LIDAR_TO_WEAPON_Z = 0.0  # m
 T_LIDAR_TO_WEAPON = np.array([
     [1.0, 0.0, 0.0, LIDAR_TO_WEAPON_X],
@@ -452,25 +509,3 @@ def cal_weapon_position(T_map_lidar: np.ndarray):
         "T_map_weapon": T_map_weapon,
     }
 #-----------------------------------------------------------------------------------------------------
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-

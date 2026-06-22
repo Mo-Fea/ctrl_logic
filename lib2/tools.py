@@ -17,8 +17,11 @@ SOF1 = 0xA5
 SOF2 = 0x5A
 TYPE = 0x01
 CHANNEL_COUNT = 10
-LEN = 0x1A
+LEN = 0x1C
 SAFE_SWITCH_VALUE = 1
+CYLINDER_SELECT_BOTH = 0
+CYLINDER_SELECT_PF2 = 1
+CYLINDER_SELECT_PF3 = 2
 relocalization_flag = False
 AUTO_TRIGGER_LOCK = threading.Lock()
 
@@ -206,7 +209,21 @@ def _clamp_i16(v):
     return max(-32768, min(32767, int(v)))
 
 
-def build_frame(seq, channels, yaw_i16=0, des_yaw_i16=0):
+def validate_cylinder_select(cylinder_select):
+    cylinder_select = int(cylinder_select)
+    if cylinder_select not in (
+        CYLINDER_SELECT_BOTH,
+        CYLINDER_SELECT_PF2,
+        CYLINDER_SELECT_PF3,
+    ):
+        raise ValueError(
+            "cylinder_select must be 0(PF2/PF3), 1(PF2) or 2(PF3), "
+            f"got {cylinder_select}"
+        )
+    return cylinder_select
+
+
+def build_frame(seq, channels, yaw_i16=0, des_yaw_i16=0, cylinder_select=CYLINDER_SELECT_BOTH):
     """
     帧格式:
     SOF1 SOF2 LEN TYPE payload crc16
@@ -216,18 +233,21 @@ def build_frame(seq, channels, yaw_i16=0, des_yaw_i16=0):
       10*<h channels>
       <h  yaw_i16>
       <h  des_yaw_i16>
+      <h  cylinder_select>
     """
     if len(channels) != CHANNEL_COUNT:
         raise ValueError(f"channels length must be {CHANNEL_COUNT}")
 
     yaw_i16 = _clamp_i16(yaw_i16)
     des_yaw_i16 = _clamp_i16(des_yaw_i16)
+    cylinder_select = validate_cylinder_select(cylinder_select)
 
     payload = struct.pack("<H", seq & 0xFFFF)
     for ch in channels:
         payload += struct.pack("<h", _clamp_i16(ch))
     payload += struct.pack("<h", yaw_i16)
     payload += struct.pack("<h", des_yaw_i16)
+    payload += struct.pack("<h", cylinder_select)
 
     crc_data = bytes([LEN, TYPE]) + payload
     crc = crc16_ccitt(crc_data)
@@ -243,6 +263,7 @@ def build_stop_frame(seq, channel_count=CHANNEL_COUNT):
         channels=channels,
         yaw_i16=0,
         des_yaw_i16=0,
+        cylinder_select=CYLINDER_SELECT_BOTH,
     )
 
 
@@ -475,11 +496,10 @@ class frame_thread:
     持续发 frame 的后台线程类。
 
     说明:
-    - 维护 ch0 ~ ch9、当前航向 yaw_i16、目标航向 des_yaw_i16
+    - 维护 ch0 ~ ch9、当前航向 yaw_i16、目标航向 des_yaw_i16、气泵选择 cylinder_select
     - start() 后按固定频率持续发送
     - 外部通过 set_* 方法修改输出状态
-    - 默认目标角为 90°；一旦 relocalization_flag=True 且外部尚未显式设置目标角，
-      自动切换为 0.01°
+    - 默认 des_yaw_i16=0，关闭航向 PID；重定位成功后也不自动修改目标航向
     """
     def __init__(
         self,
@@ -515,8 +535,8 @@ class frame_thread:
         self.ch9 = SAFE_SWITCH_VALUE
 
         self.yaw_i16 = 0
-        self.des_yaw_i16 = yaw_deg_to_i16(90.0)
-        self._des_yaw_set_by_user = False
+        self.des_yaw_i16 = 0
+        self.cylinder_select = CYLINDER_SELECT_BOTH
 
         self._lock = threading.Lock()
         self._running = False
@@ -570,12 +590,20 @@ class frame_thread:
         with self._lock:
             self._set_channel_locked(index, value)
 
-    def set_channel_values(self, channel_values, yaw_i16=None, des_yaw_i16=None, reset_channels=False):
+    def set_channel_values(
+        self,
+        channel_values,
+        yaw_i16=None,
+        des_yaw_i16=None,
+        cylinder_select=None,
+        reset_channels=False,
+    ):
         """
         原子设置一个或多个内部通道变量。
 
         channel_values 只描述需要修改的通道，例如 {0: lateral, 2: forward}。
         reset_channels=True 时先恢复 ch0~ch3=0、ch4~ch9=SAFE_SWITCH_VALUE。
+        cylinder_select 用于 V3 协议的抽气泵选择：0=PF2/PF3，1=PF2，2=PF3。
         """
         with self._lock:
             if reset_channels:
@@ -586,7 +614,8 @@ class frame_thread:
                 self.yaw_i16 = int(yaw_i16)
             if des_yaw_i16 is not None:
                 self.des_yaw_i16 = int(des_yaw_i16)
-                self._des_yaw_set_by_user = True
+            if cylinder_select is not None:
+                self.cylinder_select = validate_cylinder_select(cylinder_select)
             return self._channels_snapshot()
 
     def set_ch0(self, value):
@@ -626,14 +655,26 @@ class frame_thread:
     def set_des_yaw_i16(self, des_yaw_i16):
         with self._lock:
             self.des_yaw_i16 = int(des_yaw_i16)
-            self._des_yaw_set_by_user = True
 
-    def set_safe_stop(self, yaw_i16=0, des_yaw_i16=0):
+    def set_cylinder_select(self, cylinder_select):
+        with self._lock:
+            self.cylinder_select = validate_cylinder_select(cylinder_select)
+
+    def set_cylinder_select_both(self):
+        self.set_cylinder_select(CYLINDER_SELECT_BOTH)
+
+    def set_cylinder_select_pf2(self):
+        self.set_cylinder_select(CYLINDER_SELECT_PF2)
+
+    def set_cylinder_select_pf3(self):
+        self.set_cylinder_select(CYLINDER_SELECT_PF3)
+
+    def set_safe_stop(self, yaw_i16=0, des_yaw_i16=0, cylinder_select=CYLINDER_SELECT_BOTH):
         with self._lock:
             self._reset_channels_locked()
             self.yaw_i16 = int(yaw_i16)
             self.des_yaw_i16 = int(des_yaw_i16)
-            self._des_yaw_set_by_user = True
+            self.cylinder_select = validate_cylinder_select(cylinder_select)
 
     def get_state(self):
         with self._lock:
@@ -641,6 +682,7 @@ class frame_thread:
                 "channels": self._channels_snapshot(),
                 "yaw_i16": int(self.yaw_i16),
                 "des_yaw_i16": int(self.des_yaw_i16),
+                "cylinder_select": int(self.cylinder_select),
                 "seq": int(self.seq),
                 "last_send_ok": bool(self._last_send_ok),
                 "last_send_time": self._last_send_time,
@@ -697,22 +739,20 @@ class frame_thread:
 
     def _snapshot(self):
         with self._lock:
-            des_yaw_i16 = int(self.des_yaw_i16)
-            if relocalization_flag and (not self._des_yaw_set_by_user):
-                des_yaw_i16 = yaw_deg_to_i16(0.01)
             return (
                 self.sock,
                 int(self.seq),
                 self._channels_snapshot(),
                 int(self.yaw_i16),
-                des_yaw_i16,
+                int(self.des_yaw_i16),
+                int(self.cylinder_select),
                 bool(self._running),
             )
 
     def _run(self):
         next_send = time.time()
         while True:
-            sock, seq, channels, yaw_i16, des_yaw_i16, running = self._snapshot()
+            sock, seq, channels, yaw_i16, des_yaw_i16, cylinder_select, running = self._snapshot()
             if not running:
                 break
 
@@ -721,6 +761,7 @@ class frame_thread:
                 channels=channels,
                 yaw_i16=yaw_i16,
                 des_yaw_i16=des_yaw_i16,
+                cylinder_select=cylinder_select,
             )
             next_sock, ok = send_frame(
                 sock=sock,
