@@ -277,6 +277,9 @@ def main():
         )
         print("Show action matrix finished.")
         print(matrix_result)
+        if not matrix_result.get("completed", False):
+            print("Show flow failed: action matrix did not complete.")
+            return
 
         print(
             f"Rotating in place to target_yaw={POST_MATRIX_TARGET_YAW_DEG:.2f} deg..."

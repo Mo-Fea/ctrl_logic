@@ -267,6 +267,9 @@ def main():
         )
         print("QR action matrix finished.")
         print(matrix_result)
+        if not matrix_result.get("completed", False):
+            print("Complete blue test failed: QR action matrix did not complete.")
+            return
 
         print(
             "Moving to post-exit target 1 "

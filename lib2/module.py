@@ -1560,6 +1560,12 @@ def execute_stair_transition(
             "to_y": float(to_y),
             "stair_action": "climb",
             "stair_result": stair_result,
+            "completed": bool(stair_result.get("completed", False)),
+            "failed_step": (
+                None
+                if stair_result.get("completed", False)
+                else "climb"
+            ),
         }
 
     stair_result = descend(
@@ -1583,6 +1589,12 @@ def execute_stair_transition(
         "to_y": float(to_y),
         "stair_action": "descend",
         "stair_result": stair_result,
+        "completed": bool(stair_result.get("completed", False)),
+        "failed_step": (
+            None
+            if stair_result.get("completed", False)
+            else "descend"
+        ),
     }
 
 
@@ -1683,7 +1695,14 @@ def execute_action_row(
 
     # 场外 1/3 号格侧吸是特殊动作，-1 与 1/3 不是普通相邻台阶。
     # 必须在方向、相邻性和高低关系校验前直接分流。
-    if from_pos == -1 and to_pos in (1, 3):
+    is_pre_entry_side_suck = (
+        from_pos == -1
+        and to_pos in (1, 3)
+        and move_dir == 1
+        and height_action == 0
+        and grab_action == 1
+    )
+    if is_pre_entry_side_suck:
         side_suck_result = side_suck(
             sender=sender,
             position_runtime=position_runtime,
@@ -1804,7 +1823,12 @@ def execute_action_row(
             result["return_center_skipped"] = True
             result["return_center_skip_reason"] = "fetch_failed"
             if not fetch_result.get("completed", False):
+                result["completed"] = False
                 result["implemented"] = True
+                result["failed_step"] = fetch_result.get(
+                    "failed_step",
+                    "fetch_and_store_kfs",
+                )
                 return result
 
             next_inferred_direction = 0
@@ -1835,7 +1859,9 @@ def execute_action_row(
             result["next_height_relation"] = int(next_height_relation)
             if should_skip_return_center:
                 result["return_center_skip_reason"] = "next_climb_to_same_target"
+                result["completed"] = True
                 result["implemented"] = True
+                result["failed_step"] = None
                 return result
 
             return_center_yaw_deg = tools.direction_int_to_yaw_deg(move_dir)
@@ -1852,7 +1878,11 @@ def execute_action_row(
             result["return_center_skipped"] = False
             result["return_center_skip_reason"] = None
             result["return_center_target_yaw_deg"] = float(return_center_yaw_deg)
+            result["completed"] = return_center_result is not None
             result["implemented"] = True
+            result["failed_step"] = (
+                None if return_center_result is not None else "return_to_stair_center"
+            )
             return result
 
         if height_action != 0:
@@ -1870,17 +1900,25 @@ def execute_action_row(
             )
             result["branch"] = "directional"
             result["stair_transition_result"] = stair_transition_result
+            result["completed"] = bool(
+                stair_transition_result.get("completed", False)
+            )
             result["implemented"] = True
+            result["failed_step"] = stair_transition_result.get("failed_step")
             return result
 
         # TODO: 第一段逻辑：有方向动作，后续在这里接入夹取、上下楼梯和移动。
         result["branch"] = "directional"
+        result["completed"] = False
         result["implemented"] = False
+        result["failed_step"] = "directional_branch_not_implemented"
         return result
 
     # TODO: 第二段逻辑：原地动作，后续在这里接入原地夹取/等待等逻辑。
     result["branch"] = "stationary"
+    result["completed"] = False
     result["implemented"] = False
+    result["failed_step"] = "stationary_branch_not_implemented"
     return result
 
 
@@ -1891,6 +1929,7 @@ def execute_action_matrix(
     action_matrix,
     final_direction=1,
     stop_on_unimplemented=True,
+    stop_on_failed=True,
 ):
     """
     顺序执行动作矩阵。
@@ -1898,6 +1937,7 @@ def execute_action_matrix(
     action_matrix: n*5，每行格式同 execute_action_row()。
     final_direction: 没有下一行有效移动时使用的默认最终朝向。
     stop_on_unimplemented: 遇到 execute_action_row() 返回 implemented=False 时是否终止。
+    stop_on_failed: 遇到已实现但 completed=False 的动作行时是否终止。
     """
     final_direction = _action_value_to_int(final_direction, "final_direction")
     if final_direction not in (1, 2, 3, 4):
@@ -1910,6 +1950,8 @@ def execute_action_matrix(
     rows = _action_matrix_to_rows(action_matrix)
     row_count = len(rows)
     results = []
+    failed_row_index = None
+    failure_reason = None
     for row_index, action_row in enumerate(rows):
         row_kwargs = {}
         row_final_direction = final_direction
@@ -1980,9 +2022,26 @@ def execute_action_matrix(
             )
             sys.exit(1)
 
+        if not row_result.get("completed", False):
+            if failed_row_index is None:
+                failed_row_index = int(row_index)
+                failure_reason = row_result.get("failed_step", "action_row_failed")
+            if stop_on_failed:
+                print(
+                    f"{execute_action_matrix.__name__}执行失败: "
+                    f"第 {row_index} 行未完成 "
+                    f"action_row={row_result.get('action_row')}, "
+                    f"failed_step={failure_reason}"
+                )
+                break
+
     return {
-        "completed": True,
+        "completed": failed_row_index is None and len(results) == row_count,
         "row_count": row_count,
+        "executed_row_count": len(results),
         "final_direction": int(final_direction),
+        "stopped_early": len(results) < row_count,
+        "failed_row_index": failed_row_index,
+        "failure_reason": failure_reason,
         "results": results,
     }

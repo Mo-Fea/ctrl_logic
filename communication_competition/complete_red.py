@@ -207,6 +207,9 @@ def main():
         )
         print("Default action matrix finished.")
         print(matrix_result)
+        if not matrix_result.get("completed", False):
+            print("Complete red test failed: action matrix did not complete.")
+            return
 
         print(f"Waiting {HOLD_AFTER_DONE_SEC:.1f}s after action matrix...")
         time.sleep(HOLD_AFTER_DONE_SEC)

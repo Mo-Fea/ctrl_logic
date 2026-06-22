@@ -1,16 +1,20 @@
 #!/usr/bin/env python3
 
 import math
+import queue
 import re
+import threading
 import time
 from dataclasses import dataclass
 
 from lib2 import kfs, module, move, position_backend, tools, weapon
+from utils import challenge_lib, race
 
 
 INVALID_INPUT_MESSAGE = "严格按照上述数字进行输入"
 LIDAR_TYPE = position_backend.LIDAR_TYPE_ODIN
 MOVE_TIMEOUT_SEC = 30.0
+QR_STABLE_FRAME_COUNT = 5
 current_stair_id = 0
 
 
@@ -142,6 +146,20 @@ def read_stop_distance():
             continue
         value = float(raw_value)
         if math.isfinite(value) and value > 0.0:
+            return value
+        print(INVALID_INPUT_MESSAGE)
+
+
+def read_adjust_distance():
+    pattern = re.compile(r"^\+?\d+\.\d{2}$")
+    prompt = "请输入微调距离(单位m，保留两位，0-0.5):"
+    while True:
+        raw_value = input(prompt).strip()
+        if not pattern.fullmatch(raw_value):
+            print(INVALID_INPUT_MESSAGE)
+            continue
+        value = float(raw_value)
+        if 0.0 <= value <= 0.5:
             return value
         print(INVALID_INPUT_MESSAGE)
 
@@ -626,7 +644,8 @@ def print_meilin_region_test_menu():
     print("2.上下楼梯测试")
     print("3.方块吸取测试")
     print("4.侧吸测试")
-    print("5.完整梅林测试")
+    print("5.边缘微调测试")
+    print("6.完整梅林测试")
 
 
 def is_valid_stair_id(stair_id):
@@ -794,9 +813,128 @@ def run_side_suck_test(context):
     }
 
 
+def run_edge_adjust_test(context):
+    print("---------------------------------------------------------------------------------------------")
+    print("边缘微调测试")
+
+    if not is_valid_stair_id(current_stair_id):
+        print("位置错误")
+        return {
+            "completed": False,
+            "executed": False,
+            "reason": "invalid_current_stair",
+            "current_stair_id": int(current_stair_id),
+        }
+
+    direction = int(read_choice(
+        {"1", "2", "3", "4"},
+        prompt="请输入微调方向（1：0 2：90 3：-90 4：180）：",
+    ))
+    adjust_distance = read_adjust_distance()
+    result = module.adjust_position(
+        sender=context.sender,
+        position_runtime=context.position_runtime,
+        odom_runtime=context.odom_runtime,
+        move_type=1,
+        direction=direction,
+        stair_id=current_stair_id,
+        height_relation=2,
+        adjust_distance=adjust_distance,
+    )
+    print("边缘微调测试执行结果：")
+    print(result)
+    return {
+        "completed": result.get("move_result") is not None,
+        "executed": True,
+        "current_stair_id": int(current_stair_id),
+        "direction": int(direction),
+        "adjust_distance": float(adjust_distance),
+        "result": result,
+    }
+
+
+def run_complete_meilin_test(context):
+    global current_stair_id
+
+    print("---------------------------------------------------------------------------------------------")
+    if int(current_stair_id) != -1:
+        print("位置错误，请先做梅林动作准备")
+        return {
+            "completed": False,
+            "executed": False,
+            "reason": "current_stair_is_not_minus_one",
+            "current_stair_id": int(current_stair_id),
+        }
+
+    print("完整梅林测试")
+    competition_mode = int(read_choice(
+        {"1", "2"},
+        prompt="请输入当前规则（1）挑战赛221（2）对抗赛331 ：",
+    ))
+    competition_result = race.configure_competition_mode(competition_mode)
+    print("等待有效二维码输入中....")
+
+    action_matrix_queue = queue.Queue()
+    visual_lock = threading.Lock()
+    scanner = None
+    try:
+        scanner = challenge_lib.start_background_qr_scanner(
+            result_queue=action_matrix_queue,
+            stable_frame_count=QR_STABLE_FRAME_COUNT,
+            show_window=False,
+            stop_after_success=True,
+            put_action_matrix_only=True,
+            running_lock=visual_lock,
+        )
+        time.sleep(0.5)
+        with visual_lock:
+            if action_matrix_queue.empty():
+                scanner_error = getattr(scanner, "last_error", None)
+                if scanner_error is not None:
+                    print(f"二维码识别或路径规划失败：{scanner_error!r}")
+                    failure_reason = "qr_scanner_error"
+                else:
+                    print("未获取到有效的完整动作矩阵")
+                    failure_reason = "action_matrix_queue_empty"
+                return {
+                    "completed": False,
+                    "executed": False,
+                    "reason": failure_reason,
+                    "competition_result": competition_result,
+                }
+
+            action_matrix = action_matrix_queue.get()
+            print("完整动作矩阵：")
+            print(action_matrix)
+            matrix_result = module.execute_action_matrix(
+                sender=context.sender,
+                position_runtime=context.position_runtime,
+                odom_runtime=context.odom_runtime,
+                action_matrix=action_matrix,
+                final_direction=1,
+            )
+
+        print("完整梅林测试执行结果：")
+        print(matrix_result)
+        if matrix_result.get("completed", False) and len(action_matrix) > 0:
+            current_stair_id = int(action_matrix[-1][1])
+        return {
+            "completed": bool(matrix_result.get("completed", False)),
+            "executed": True,
+            "competition_result": competition_result,
+            "action_matrix": action_matrix,
+            "matrix_result": matrix_result,
+            "current_stair_id": int(current_stair_id),
+        }
+    finally:
+        if scanner is not None:
+            scanner.stop()
+            scanner.join(timeout=1.0)
+
+
 def run_meilin_region_test_menu(context):
     print_meilin_region_test_menu()
-    choice = read_choice({"1", "2", "3", "4", "5"})
+    choice = read_choice({"1", "2", "3", "4", "5", "6"})
     if choice == "1":
         return run_meilin_test_prepare(context)
     if choice == "2":
@@ -805,6 +943,10 @@ def run_meilin_region_test_menu(context):
         return run_kfs_fetch_test(context)
     if choice == "4":
         return run_side_suck_test(context)
+    if choice == "5":
+        return run_edge_adjust_test(context)
+    if choice == "6":
+        return run_complete_meilin_test(context)
 
     print("该测试分支暂未实现")
     return None

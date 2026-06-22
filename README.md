@@ -354,9 +354,9 @@ race.REQUIRED_R2_PICKUP_COUNT = 2   # 必须拿取数，与场上R2总数独立
 12 -> [12, 15, 1, 1, 0]
 ```
 
-`module.execute_action_matrix(...)` 会逐行调用 `execute_action_row(...)`，并把下一行上下文传给当前行，用于 KFS 抓取后是否需要回中心的判断。
+`module.execute_action_matrix(...)` 会逐行调用 `execute_action_row(...)`，并把下一行上下文传给当前行，用于 KFS 抓取后是否需要回中心的判断。每行统一返回 `implemented/completed/failed_step`；默认在首个 `completed=False` 的已实现动作处停止，矩阵结果会返回 `failed_row_index`、`failure_reason` 和 `executed_row_count`。仅调试穷举时才应显式传入 `stop_on_failed=False`。
 
-`execute_action_row(...)` 在普通相邻性/方向校验前优先识别 `[-1,1,1,0,1]` 和 `[-1,3,1,0,1]`，直接调用 `module.side_suck(target_stair_id=1|3)`。`[-1,2,1,0,1]` 仍走普通方向抓取分支。
+`execute_action_row(...)` 在普通相邻性/方向校验前优先精确识别 `[-1,1,1,0,1]` 和 `[-1,3,1,0,1]`，直接调用 `module.side_suck(target_stair_id=1|3)`。只有这两种完整字段组合会启动侧吸；其他 `-1->1/3` 组合会进入常规校验并因非相邻而拒绝执行。`[-1,2,1,0,1]` 仍走普通方向抓取分支。
 
 当前行的最终朝向默认取下一行 `from_pos -> to_pos` 的方向；如果下一行实际执行下楼（`height_action=1`、`grab_action=0` 且高低关系为 `2`），则使用该方向的反方向，使机器在进入 `descend()` 前已经按倒退下楼姿态对正。最后一行仍使用 `execute_action_matrix(final_direction=...)` 的传入值。
 
@@ -569,7 +569,7 @@ move.reset_weapon_after_fetch(sender)
 - 方块模式 `cylinderSelect` 和四档 `ch9` 已有底层接口，普通双头吸取和场外 1/3 号侧吸已接入；pose4 完整放置流程仍未实现。
 - 侧吸的 pose5 `1.0s`、横移后 `0.5s`、收尾 pose3 默认 `3.0s` 都是时间等待，没有机械臂到位 ACK；侧吸、横移持物和并发回 `-1` 尚未完整实机验证。
 - `challenge_lib` 场外规划成功后会在当前进程内将 R2 布局数和剩余抓取数各减 `1`；当前约定一次流程只进行一次成功规划。如后续支持多次规划，需要增加显式重置或局部规划上下文。
-- `execute_action_matrix()` 当前只在 `implemented=False` 时中止，不会因某行 `completed=False` 自动停止，执行层尚需补充失败传播。
+- `execute_action_matrix()` 已在首个 `completed=False` 动作行停止并返回失败上下文；各主流入口会在矩阵失败后直接结束，不再继续赛后移动。当前仍无硬件 ACK，“成功”只能表示现有时间/位姿条件未报错。
 - 锁轮协议只明确 `ch5=1,ch6=2`，未明确锁存行为；当前实现按持续状态使用，切换模式后不承诺保持锁轮。
 - 旧 `lib/` 仍使用 `payload_len=0x1A`、旧 IP 且无 `cylinderSelect`；`test/level_1.py` 仍导入该旧库。`catch.py` 仍有 weapon `ch4=-100` 时序，这些都不属于当前协议主线。
 - 当前旋转关闭了位置保持，可能出现旋转漂移；这是当前代码事实，不是长期闭环方案。
@@ -598,6 +598,7 @@ move.reset_weapon_after_fetch(sender)
 - 已用模拟上下文检查 `ultimate_test_script.py` 的锁轮/解锁菜单分派、初始区域 `fetch_weapon -> lock_wheel` 顺序、上下楼/普通 KFS 行生成，以及侧吸测试的 `current_stair_id=-1`校验和 `[-1,1|3,1,0,1]` 分派。
 - 已用模拟 sender/runtime 检查 `module.side_suck()` 四种目标/次数角度分派、气缸 -> 旋转 -> pose5 -> 吸取 -> 实时坐标横移 -> 等待 -> 收尾线程 -> 回 `-1` 的调用顺序。
 - 已检查比赛模式 1/2、KFS 数量校验、场外 1/2/3 号候选规划，以及“无场外吸取时入口行在第一行，有场外吸取时在第二行”的矩阵顺序。
+- 已用模拟行结果检查 `execute_action_matrix()` 的全部成功、首行失败即停止、`stop_on_failed=False` 继续执行三种路径；失败行索引、原因和已执行行数均符合预期。
 - 上述 KFS 双头旋转、普通/侧吸、锁轮/解锁和放置相关动作尚未在当前修改后做完整实机联调。
 - `utils/race.py` 的 matplotlib 可视化有 SVG 兜底；matplotlib 不可用时会生成 `race_visualization.svg`。
 - 挑战赛完整矩阵已验证自动插入入口行 `[-1,2,1,1,0]`，并在最后到 `10/12` 时追加 `[10,13,1,1,0]` / `[12,15,1,1,0]`。
