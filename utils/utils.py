@@ -44,10 +44,10 @@ MOVE_DIR_CODES = {
 
 MOVE_DIR_NAMES = {
     0: "原地",
-    1: "前方",
-    2: "+90度/左",
-    3: "-90度/右",
-    4: "后方",
+    1: "方向1(红+Y/蓝-Y)",
+    2: "方向2(红-X/蓝+X)",
+    3: "方向3(红+X/蓝-X)",
+    4: "方向4(红-Y/蓝+Y)",
 }
 
 GRAB_ACTION_NAMES = {
@@ -58,6 +58,10 @@ GRAB_ACTION_NAMES = {
 EXIT_ACTION_ROWS = {
     10: [10, 13, 1, 1, 0],
     12: [12, 15, 1, 1, 0],
+}
+EXIT_ACTION_TARGETS = {
+    10: 13,
+    12: 15,
 }
 
 
@@ -105,9 +109,22 @@ def qr_to_kfs(qr_string):
 
 
 def _direction_code(from_pos, to_pos, task_type=TASK_CHALLENGE):
-    """Calculate grid movement direction code from the selected task planner."""
+    """计算动作矩阵方向码；挑战赛分支复用执行层当前红/蓝半场语义。"""
     if from_pos == to_pos:
         return 0
+
+    task_type = normalize_task_type(task_type)
+    if task_type == TASK_CHALLENGE:
+        from lib2 import tools
+
+        direction = tools.stair_id_to_direction(
+            int(from_pos),
+            int(to_pos),
+            exit_on_error=False,
+        )
+        if direction == 0:
+            raise ValueError(f"位置 {from_pos} 到 {to_pos} 不是相邻格，无法生成动作矩阵")
+        return int(direction)
 
     planner = get_task_planner(task_type)
     from_a, from_b, _ = planner.pos_to_coord[int(from_pos)]
@@ -131,14 +148,26 @@ def _height_action(from_pos, to_pos, task_type=TASK_CHALLENGE):
     return 0
 
 
-def _append_exit_action(rows):
+def _append_exit_action(rows, task_type=TASK_CHALLENGE):
     if not rows:
         return rows
 
+    task_type = normalize_task_type(task_type)
     last_to_pos = int(rows[-1][1])
-    exit_row = EXIT_ACTION_ROWS.get(last_to_pos)
-    if exit_row is not None:
-        rows.append(exit_row.copy())
+    if task_type == TASK_CHALLENGE:
+        exit_to_pos = EXIT_ACTION_TARGETS.get(last_to_pos)
+        if exit_to_pos is not None:
+            rows.append([
+                last_to_pos,
+                exit_to_pos,
+                _direction_code(last_to_pos, exit_to_pos, task_type=task_type),
+                1,
+                0,
+            ])
+    else:
+        exit_row = EXIT_ACTION_ROWS.get(last_to_pos)
+        if exit_row is not None:
+            rows.append(exit_row.copy())
     return rows
 
 
@@ -206,7 +235,7 @@ def path_to_action_matrix(kfs, path, task_type=TASK_CHALLENGE):
         else:
             raise ValueError(f"未知路径步骤：{step}")
 
-    rows = _append_exit_action(rows)
+    rows = _append_exit_action(rows, task_type=task_type)
     if not rows:
         return np.zeros((0, 5), dtype=int)
     return np.array(rows, dtype=int)

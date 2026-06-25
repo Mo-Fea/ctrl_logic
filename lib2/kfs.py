@@ -281,7 +281,7 @@ def kfs_transition_pose(
     )
 
 
-def kfs_store_pose(
+def place_kfs_pose(
     sender,
     arm_sec=0.1,
     fire_sec=0.4,
@@ -384,6 +384,236 @@ def _release_kfs_suction_with_lock(
         "release_edge_suppressed": bool(keep_suction_on),
         "completed": True,
     }
+
+
+def release_kfs(sender):
+    """
+    按吸取的逆序释放一个 KFS。
+
+    先将全局 suck_count 减 1，再用减后的值选择对应气缸：
+      2 -> PF3
+      1 -> PF2
+    随后触发 KFS 模式下的 ch4:3->1 释放边沿。
+    """
+    global suck_count
+
+    suck_count_before = int(suck_count)
+    suck_count -= 1
+    release_count = int(suck_count)
+    if release_count not in (1, 2):
+        suck_count = suck_count_before
+        print("未吸取足够kfs进行操作")
+        sys.exit(1)
+
+    cylinder_selection_result = sucker_select_cylinder(
+        sender,
+        cylinder_select=release_count,
+    )
+    release_result = _release_kfs_suction_with_lock(
+        sender=sender,
+        keep_suction_on=False,
+    )
+    return {
+        "completed": bool(release_result.get("completed", False)),
+        "failed_step": (
+            None
+            if release_result.get("completed", False)
+            else "release_suction"
+        ),
+        "suck_count_before": suck_count_before,
+        "suck_count_after": int(suck_count),
+        "released_cylinder": release_count,
+        "cylinder_selection_result": cylinder_selection_result,
+        "release_result": release_result,
+    }
+
+
+def sucker_release_pose(sender):
+    """
+    根据当前 suck_count 设置 KFS 释放前的吸盘角度。
+
+      suck_count=3 -> 180deg
+      suck_count=2 -> 0deg
+    """
+    current_suck_count = int(suck_count)
+    if current_suck_count == 3:
+        rotation_result = sucker_180deg(sender)
+    elif current_suck_count == 2:
+        rotation_result = sucker_0deg(sender)
+    else:
+        print("未吸取足够kfs进行操作")
+        sys.exit(1)
+
+    return {
+        "completed": bool(rotation_result.get("completed", False)),
+        "failed_step": (
+            None
+            if rotation_result.get("completed", False)
+            else "rotate_sucker_for_release"
+        ),
+        "suck_count": current_suck_count,
+        "angle_deg": int(rotation_result["angle_deg"]),
+        "rotation_result": rotation_result,
+    }
+
+
+def place_3rd_kfs(
+    sender,
+    position_runtime,
+    jdg_range=0.04,
+    loop_interval_sec=0.02,
+    confirm_frame_count=5,
+    timeout_enabled=True,
+    timeout_sec=30.0,
+):
+    """
+    通过机器人 Z 坐标下降量判断第三个 KFS 的释放时机。
+
+    持续记录观测到的最大 Z；当 max_z - current_z >= jdg_range
+    连续满足 confirm_frame_count 个真实更新帧时，调用 release_kfs(sender)
+    释放并退出。
+    timeout_enabled=True 时，超过 timeout_sec 未满足条件则返回失败，默认 30s。
+    timeout_enabled=False 时不做超时退出。
+    """
+    jdg_range = float(jdg_range)
+    if jdg_range <= 0.0:
+        raise ValueError(f"jdg_range must be > 0, got {jdg_range}")
+
+    loop_interval_sec = float(loop_interval_sec)
+    if loop_interval_sec <= 0.0:
+        raise ValueError(
+            f"loop_interval_sec must be > 0, got {loop_interval_sec}"
+        )
+    confirm_frame_count = int(confirm_frame_count)
+    if confirm_frame_count <= 0:
+        raise ValueError(
+            f"confirm_frame_count must be > 0, got {confirm_frame_count}"
+        )
+    timeout_enabled = bool(timeout_enabled)
+    if timeout_enabled:
+        timeout_sec = float(timeout_sec)
+        if timeout_sec <= 0.0:
+            raise ValueError(f"timeout_sec must be > 0, got {timeout_sec}")
+    else:
+        timeout_sec = None
+
+    max_z = None
+    current_z = None
+    z_drop = None
+    drop_confirm_count = 0
+    valid_frame_count = 0
+    last_update_time = None
+    started_at = time.monotonic()
+    timeout_text = "关闭" if not timeout_enabled else f"{timeout_sec:.1f}s"
+    print(
+        "开始检测机器人Z下降："
+        f"阈值={jdg_range:.3f}m，连续帧数={confirm_frame_count}，"
+        f"超时={timeout_text}"
+    )
+    while True:
+        elapsed_sec = time.monotonic() - started_at
+        if timeout_enabled and elapsed_sec >= timeout_sec:
+            print(
+                "机器人Z下降检测超时："
+                f"max_z={max_z}，current_z={current_z}，"
+                f"z_drop={z_drop}，连续帧数={drop_confirm_count}"
+            )
+            return {
+                "completed": False,
+                "failed_step": "wait_for_z_drop_timeout",
+                "jdg_range": float(jdg_range),
+                "max_z": None if max_z is None else float(max_z),
+                "current_z": None if current_z is None else float(current_z),
+                "z_drop": None if z_drop is None else float(z_drop),
+                "confirm_frame_count": int(confirm_frame_count),
+                "drop_confirm_count": int(drop_confirm_count),
+                "valid_frame_count": int(valid_frame_count),
+                "last_update_time": last_update_time,
+                "timeout_enabled": bool(timeout_enabled),
+                "timeout_sec": float(timeout_sec),
+                "elapsed_sec": float(elapsed_sec),
+                "release_result": None,
+            }
+
+        get_position_sample = getattr(
+            position_runtime,
+            "get_current_position_sample",
+            None,
+        )
+        if get_position_sample is not None:
+            current_position = get_position_sample()
+        else:
+            current_position = position_runtime.get_current_position()
+            if current_position is not None:
+                get_latest_update_time = getattr(
+                    position_runtime,
+                    "get_latest_update_time",
+                    None,
+                )
+                current_position["update_time"] = (
+                    get_latest_update_time()
+                    if get_latest_update_time is not None
+                    else time.time()
+                )
+
+        if current_position is None:
+            time.sleep(loop_interval_sec)
+            continue
+
+        update_time = current_position.get("update_time")
+        if update_time is None or update_time == last_update_time:
+            time.sleep(loop_interval_sec)
+            continue
+        last_update_time = float(update_time)
+        valid_frame_count += 1
+
+        current_z = float(current_position["z"])
+        if max_z is None or current_z > max_z:
+            max_z = current_z
+
+        z_drop = max_z - current_z
+        if z_drop >= jdg_range:
+            drop_confirm_count += 1
+        else:
+            drop_confirm_count = 0
+
+        print(
+            "Z下降检测："
+            f"frame={valid_frame_count} "
+            f"max_z={max_z:.4f}m "
+            f"current_z={current_z:.4f}m "
+            f"z_drop={z_drop:.4f}m "
+            f"confirm={drop_confirm_count}/{confirm_frame_count}"
+        )
+
+        if drop_confirm_count >= confirm_frame_count:
+            print(
+                f"检测到连续{confirm_frame_count}帧下降"
+                f"{z_drop:.4f}m，开始释放KFS"
+            )
+            release_result = release_kfs(sender)
+            return {
+                "completed": bool(release_result.get("completed", False)),
+                "failed_step": (
+                    None
+                    if release_result.get("completed", False)
+                    else "release_kfs"
+                ),
+                "jdg_range": float(jdg_range),
+                "max_z": float(max_z),
+                "current_z": float(current_z),
+                "z_drop": float(z_drop),
+                "confirm_frame_count": int(confirm_frame_count),
+                "drop_confirm_count": int(drop_confirm_count),
+                "valid_frame_count": int(valid_frame_count),
+                "last_update_time": float(last_update_time),
+                "timeout_enabled": bool(timeout_enabled),
+                "timeout_sec": None if timeout_sec is None else float(timeout_sec),
+                "elapsed_sec": float(time.monotonic() - started_at),
+                "release_result": release_result,
+            }
+
+        time.sleep(loop_interval_sec)
 
 
 def start_kfs_post_suction_thread(

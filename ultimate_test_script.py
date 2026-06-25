@@ -26,6 +26,7 @@ class RuntimeContext:
     flag_stop_event: object = None
     position_runtime: object = None
     odom_runtime: object = None
+    image_source: int = 1
 
 
 def wait_runtime_ready(context, timeout_sec=8.0):
@@ -109,9 +110,28 @@ def read_integer(prompt):
             print(INVALID_INPUT_MESSAGE)
 
 
+def convert_yaw_after_map_rotation(input_yaw_deg):
+    """
+    将测试员按原始地图坐标系输入的航向转换到当前地图坐标系。
+
+    在上一次逆时针旋转 90 度的基础上，地图又顺时针旋转 180 度，
+    因此当前地图航向 = 原始输入航向 + 90 度。结果归一化到 [-180, 180)，
+    用户直接输入 0 时保留 0，用于关闭航向 PID；其他输入转换后若为
+    0 度，则改为 0.01 度，避免意外关闭航向 PID。
+    """
+    input_yaw_deg = float(input_yaw_deg)
+    if math.isclose(input_yaw_deg, 0.0, abs_tol=1e-9):
+        return 0.0
+
+    converted_yaw_deg = (input_yaw_deg + 90.0 + 180.0) % 360.0 - 180.0
+    if math.isclose(converted_yaw_deg, 0.0, abs_tol=1e-9):
+        return 0.01
+    return converted_yaw_deg
+
+
 def read_yaw_deg():
     pattern = re.compile(r"^[+-]?\d+\.\d{2}$")
-    prompt = "请输入最终机器朝向（-180.00到180.00，须保留两位小数）"
+    prompt = "请输入原始地图坐标系下的最终机器朝向（-180.00到180.00，须保留两位小数）"
     while True:
         raw_value = input(prompt).strip()
         if not pattern.fullmatch(raw_value):
@@ -119,7 +139,9 @@ def read_yaw_deg():
             continue
         value = float(raw_value)
         if -180.0 <= value <= 180.0:
-            return value
+            converted_value = convert_yaw_after_map_rotation(value)
+            print(f"地图旋转后的目标角度：{converted_value:.2f}")
+            return converted_value
         print(INVALID_INPUT_MESSAGE)
 
 
@@ -165,11 +187,13 @@ def read_adjust_distance():
 
 
 def read_rotation_target_yaw():
-    prompt = "请输入目标角度（-180.00到180.00，最好保留两位小数，注意0是关闭pid）"
+    prompt = "请输入原始地图坐标系下的目标角度（-180.00到180.00，最好保留两位小数）"
     while True:
         value = read_finite_float(prompt)
         if -180.0 <= value <= 180.0:
-            return value
+            converted_value = convert_yaw_after_map_rotation(value)
+            print(f"地图旋转后的目标角度：{converted_value:.2f}")
+            return converted_value
         print(INVALID_INPUT_MESSAGE)
 
 
@@ -177,6 +201,22 @@ def read_positive_float(prompt):
     while True:
         value = read_finite_float(prompt)
         if value > 0.0:
+            return value
+        print(INVALID_INPUT_MESSAGE)
+
+
+def read_positive_float_with_default(prompt, default_value):
+    default_value = float(default_value)
+    while True:
+        raw_value = input(prompt).strip()
+        if raw_value == "":
+            return default_value
+        try:
+            value = float(raw_value)
+        except ValueError:
+            print(INVALID_INPUT_MESSAGE)
+            continue
+        if math.isfinite(value) and value > 0.0:
             return value
         print(INVALID_INPUT_MESSAGE)
 
@@ -215,6 +255,16 @@ def select_field_type():
         "field_type": int(field_choice),
         "field_name": field_name,
     }
+
+
+def select_qr_image_source():
+    image_source = int(read_choice(
+        {"1", "2"},
+        prompt="选择二维码识别摄像头(1.d435i 2.odin1)：",
+    ))
+    source_name = "d435i" if image_source == 1 else "odin1"
+    print(f"已选择二维码识别摄像头：{source_name}")
+    return image_source
 
 
 def print_simple_action_menu():
@@ -299,6 +349,11 @@ def run_move_test(context):
 
 def run_rotation_test(context):
     print("---------------------------------------------------------------------------------------------")
+    print("请输入旋转测试模式")
+    print("1.细节旋转测试")
+    print("2.简易旋转测试")
+    rotation_mode = read_choice({"1", "2"})
+
     print("开始旋转测试")
     print(
         "注意，地图坐标系为，让机器正面面向梅林，机器面向的方向即为x轴正方向，"
@@ -307,22 +362,32 @@ def run_rotation_test(context):
     print("x轴逆时针旋转为正，顺时针旋转为负")
 
     target_yaw_deg = read_rotation_target_yaw()
-    segment_step_deg = read_positive_float(
-        "请输入大角度分段阈值（比如设置10,实际角度与目标角度相差大于10度时，"
-        "会分成多个10度作为目标给下位机）："
-    )
-    tolerance_deg = read_rotation_tolerance()
+    if rotation_mode == "1":
+        segment_step_deg = read_positive_float(
+            "请输入大角度分段阈值（比如设置10,实际角度与目标角度相差大于10度时，"
+            "会分成多个10度作为目标给下位机）："
+        )
+        tolerance_deg = read_rotation_tolerance()
+        rotation_mode_name = "细节旋转测试"
+    else:
+        segment_step_deg = 120.0
+        tolerance_deg = 1.0
+        rotation_mode_name = "简易旋转测试"
 
     print(
-        f"朝向（{target_yaw_deg:.2f}），大角度分段阈值（{segment_step_deg}），"
+        f"模式（{rotation_mode_name}），朝向（{target_yaw_deg:.2f}），"
+        f"大角度分段阈值（{segment_step_deg}），"
         f"完成判断阈值（{tolerance_deg:.2f}）"
     )
 
     parameters = {
+        "rotation_mode": int(rotation_mode),
+        "rotation_mode_name": rotation_mode_name,
         "target_yaw_deg": target_yaw_deg,
         "segment_step_deg": segment_step_deg,
         "tolerance_deg": tolerance_deg,
     }
+    rotation_started_at = time.monotonic()
     result = move.rotate_to_target_yaw_segmented(
         sender=context.sender,
         position_runtime=context.position_runtime,
@@ -331,11 +396,14 @@ def run_rotation_test(context):
         segment_step_deg=segment_step_deg,
         tolerance_deg=tolerance_deg,
     )
+    rotation_duration_sec = time.monotonic() - rotation_started_at
     print("旋转测试执行结果：")
     print(result)
+    print(f"当前旋转总时长：{rotation_duration_sec:.2f}秒")
     return {
         "parameters": parameters,
         "result": result,
+        "rotation_duration_sec": float(rotation_duration_sec),
     }
 
 
@@ -450,7 +518,7 @@ def run_kfs_pose_test(context):
         "1": lambda sender: kfs.kfs_grab_pose(sender, pose_id=1),
         "2": lambda sender: kfs.kfs_grab_pose(sender, pose_id=2),
         "3": kfs.kfs_transition_pose,
-        "4": kfs.kfs_store_pose,
+        "4": kfs.place_kfs_pose,
         "5": kfs.kfs_side_pose,
     }
     result = pose_actions[pose_id](context.sender)
@@ -664,25 +732,28 @@ def run_meilin_test_prepare(context):
     global current_stair_id
 
     stair_id = -1
-    target_yaw_deg = 0.01
+    target_direction = 4 if position_backend.is_blue_field() else 1
+    target_yaw_deg = tools.direction_int_to_yaw_deg(target_direction)
     target_x, target_y = module.get_stair_xy(stair_id)
     print(
         f"梅林动作测试准备：朝向（{target_yaw_deg:.2f}），"
         f"移动到台阶（{stair_id}）坐标（{target_x}，{target_y}）"
     )
-    result = module.move_to_des(
+    result = module.meilin_prepare(
         sender=context.sender,
         position_runtime=context.position_runtime,
         odom_runtime=context.odom_runtime,
-        x=target_x,
-        y=target_y,
-        target_deg=target_yaw_deg,
         total_timeout_sec=MOVE_TIMEOUT_SEC,
         reference="robot",
     )
+    stair_id = int(result["stair_id"])
+    target_x = float(result["target_x"])
+    target_y = float(result["target_y"])
+    target_yaw_deg = float(result["target_yaw_deg"])
     print("梅林动作测试准备执行结果：")
     print(result)
-    current_stair_id = stair_id
+    if result.get("completed", False):
+        current_stair_id = stair_id
     return {
         "stair_id": stair_id,
         "target_x": float(target_x),
@@ -725,7 +796,8 @@ def run_stair_transition_test(context):
     )
     print("上下楼梯测试执行结果：")
     print(result)
-    current_stair_id = int(to_pos)
+    if result.get("completed", False):
+        current_stair_id = int(to_pos)
     return {
         "action_row": action_row,
         "result": result,
@@ -844,7 +916,7 @@ def run_edge_adjust_test(context):
     print("边缘微调测试执行结果：")
     print(result)
     return {
-        "completed": result.get("move_result") is not None,
+        "completed": bool(result.get("completed", False)),
         "executed": True,
         "current_stair_id": int(current_stair_id),
         "direction": int(direction),
@@ -885,6 +957,7 @@ def run_complete_meilin_test(context):
             stop_after_success=True,
             put_action_matrix_only=True,
             running_lock=visual_lock,
+            image_source=context.image_source,
         )
         time.sleep(0.5)
         with visual_lock:
@@ -952,6 +1025,208 @@ def run_meilin_region_test_menu(context):
     return None
 
 
+def print_nine_grid_region_test_menu():
+    print("---------------------------------------------------------------------------------------------")
+    print("九宫格区域测试区域测试")
+    print("1.放二层箱子测试")
+    print("2.上R1测试（目前需要R2前端人为对准R1后进行）")
+    print("3.R1上释放三层kfs测试")
+    print("4.完整九宫格区域测试")
+
+
+def run_place_second_level_box_test(context):
+    print("---------------------------------------------------------------------------------------------")
+    print("二层箱子测试")
+
+    if int(kfs.suck_count) not in (2, 3):
+        print("目前没有吸取箱子")
+        return {
+            "completed": False,
+            "executed": False,
+            "reason": "no_kfs_loaded",
+            "suck_count": int(kfs.suck_count),
+        }
+
+    place_pose_result = kfs.place_kfs_pose(context.sender)
+    if not place_pose_result.get("completed", False):
+        return {
+            "completed": False,
+            "executed": True,
+            "failed_step": "place_kfs_pose",
+            "place_pose_result": place_pose_result,
+        }
+    time.sleep(1.0)
+
+    release_pose_result = kfs.sucker_release_pose(context.sender)
+    if not release_pose_result.get("completed", False):
+        return {
+            "completed": False,
+            "executed": True,
+            "failed_step": "sucker_release_pose",
+            "place_pose_result": place_pose_result,
+            "release_pose_result": release_pose_result,
+        }
+
+    target_x = -0.950
+    target_y = -4.46
+    target_yaw_deg = 180.0
+    move_result = module.move_to_des(
+        sender=context.sender,
+        position_runtime=context.position_runtime,
+        odom_runtime=context.odom_runtime,
+        x=target_x,
+        y=target_y,
+        target_deg=target_yaw_deg,
+        total_timeout_sec=MOVE_TIMEOUT_SEC,
+        reference="robot",
+    )
+    if move_result is None or not move_result.get("completed", False):
+        print("移动到二层箱子放置位置失败，不执行释放")
+        return {
+            "completed": False,
+            "executed": True,
+            "failed_step": "move_to_second_level_target",
+            "place_pose_result": place_pose_result,
+            "release_pose_result": release_pose_result,
+            "move_target": {
+                "x": target_x,
+                "y": target_y,
+                "yaw_deg": target_yaw_deg,
+            },
+            "move_result": move_result,
+        }
+
+    release_result = kfs.release_kfs(context.sender)
+    completed = bool(release_result.get("completed", False))
+    result = {
+        "completed": completed,
+        "executed": True,
+        "failed_step": None if completed else "release_kfs",
+        "place_pose_result": place_pose_result,
+        "release_pose_result": release_pose_result,
+        "move_target": {
+            "x": target_x,
+            "y": target_y,
+            "yaw_deg": target_yaw_deg,
+        },
+        "move_result": move_result,
+        "release_result": release_result,
+        "suck_count": int(kfs.suck_count),
+    }
+    print("二层箱子测试执行结果：")
+    print(result)
+    return result
+
+
+def run_climb_r1_test(context):
+    print("---------------------------------------------------------------------------------------------")
+    print("上R1测试")
+    print("机器会面向九宫格方向，请将R1轨道对准R2")
+    read_choice({"1"}, prompt="请回复1开始测试")
+
+    result = module.climb_R1(
+        sender=context.sender,
+        position_runtime=context.position_runtime,
+        odom_runtime=context.odom_runtime,
+    )
+    print("上R1测试执行结果：")
+    print(result)
+    return {
+        "completed": bool(result.get("completed", False)),
+        "executed": True,
+        "result": result,
+    }
+
+
+def run_release_third_level_kfs_test(context):
+    print("---------------------------------------------------------------------------------------------")
+    print("R1上释放三层kfs测试")
+
+    current_suck_count = int(kfs.suck_count)
+    if not 2 <= current_suck_count <= 3:
+        print("目前没有吸取箱子")
+        return {
+            "completed": False,
+            "executed": False,
+            "reason": "invalid_suck_count",
+            "suck_count": current_suck_count,
+        }
+
+    print("不一定在R1上进行测试")
+    print("此测试效果为持续检测下降，当下降高度大于4cm时释放kfs")
+    timeout_enabled = read_choice(
+        {"1", "2"},
+        prompt="是否启用Z下降检测超时（1启用，2关闭）：",
+    ) == "1"
+    timeout_sec = None
+    if timeout_enabled:
+        timeout_sec = read_positive_float_with_default(
+            "请输入Z下降检测超时时间(秒，直接回车默认30)：",
+            30.0,
+        )
+    read_choice({"1"}, prompt="请输入1开始测试：")
+
+    place_pose_result = kfs.place_kfs_pose(context.sender)
+    if not place_pose_result.get("completed", False):
+        return {
+            "completed": False,
+            "executed": True,
+            "failed_step": "place_kfs_pose",
+            "place_pose_result": place_pose_result,
+        }
+    time.sleep(1.0)
+
+    release_pose_result = kfs.sucker_release_pose(context.sender)
+    if not release_pose_result.get("completed", False):
+        return {
+            "completed": False,
+            "executed": True,
+            "failed_step": "sucker_release_pose",
+            "place_pose_result": place_pose_result,
+            "release_pose_result": release_pose_result,
+        }
+
+    release_result = kfs.place_3rd_kfs(
+        sender=context.sender,
+        position_runtime=context.position_runtime,
+        timeout_enabled=timeout_enabled,
+        **({} if timeout_sec is None else {"timeout_sec": timeout_sec}),
+    )
+    result = {
+        "completed": bool(release_result.get("completed", False)),
+        "executed": True,
+        "failed_step": release_result.get("failed_step"),
+        "timeout_enabled": bool(timeout_enabled),
+        "timeout_sec": timeout_sec,
+        "place_pose_result": place_pose_result,
+        "release_pose_result": release_pose_result,
+        "release_result": release_result,
+        "suck_count": int(kfs.suck_count),
+    }
+    print("R1上释放三层kfs测试执行结果：")
+    print(result)
+    return result
+
+
+def run_nine_grid_region_test_menu(context):
+    print_nine_grid_region_test_menu()
+    choice = read_choice({"1", "2", "3", "4"})
+    if choice == "1":
+        return run_place_second_level_box_test(context)
+    if choice == "2":
+        return run_climb_r1_test(context)
+    if choice == "3":
+        return run_release_third_level_kfs_test(context)
+
+    print("该测试分支暂未实现")
+    return {
+        "completed": False,
+        "executed": False,
+        "choice": int(choice),
+        "reason": "not_implemented",
+    }
+
+
 def run_complex_action_menu(context):
     print_complex_action_menu()
     choice = read_choice({"1", "2", "3", "4"})
@@ -960,6 +1235,9 @@ def run_complex_action_menu(context):
         return
     if choice == "2":
         run_meilin_region_test_menu(context)
+        return
+    if choice == "3":
+        run_nine_grid_region_test_menu(context)
         return
 
     # 具体复杂动作将在对应分支中继续实现。
@@ -984,6 +1262,7 @@ def main():
             "场地半场已写入位置后端："
             f"{position_backend.get_field_type()}（{field_result['field_name']}）"
         )
+        context.image_source = select_qr_image_source()
 
         context.position_runtime = module.start_position_thread(context.sender)
         context.odom_runtime = module.start_odometry_thread(topic=module.ODOM_TOPIC)

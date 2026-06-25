@@ -14,13 +14,52 @@ from rclpy.node import Node
 ODOM_TOPIC = "/odin1/odometry_highfreq"
 position_lib = position_backend.get_position_backend()
 
-ENTRANCE_X = 2.92
-ENTRANCE_Y = 0.92
-PRE_ENTRANCE_X = 1.80
-PRE_ENTRANCE_Y = 0.957
-STAIR_SIDE_LENGTH = 1.175 #m
+ENTRANCE_X = -2.92
+ENTRANCE_Y = -0.92
+PRE_ENTRANCE_X = -1.80
+PRE_ENTRANCE_Y = -0.957
+STAIR_SIDE_LENGTH = 1.205 #m
 DEFAULT_POSITION_PREDICTION_CONTROL_DELAY_SEC = 1.0 / 70.0
 DEFAULT_POSITION_PREDICTION_MAX_DT_SEC = 0.10
+
+STAIR_HEIGHT_BY_ID_RED = {
+    -1: 0,
+    1: 40,
+    2: 20,
+    3: 40,
+    4: 60,
+    5: 40,
+    6: 20,
+    7: 40,
+    8: 60,
+    9: 40,
+    10: 20,
+    11: 40,
+    12: 20,
+    13: 0,
+    15: 0,
+}
+
+STAIR_HEIGHT_BY_ID_BLUE = {
+    -1: 0,
+    1: 40,
+    2: 20,
+    3: 40,
+    4: 20,
+    5: 40,
+    6: 60,
+    7: 40,
+    8: 60,
+    9: 40,
+    10: 20,
+    11: 40,
+    12: 20,
+    13: 0,
+    15: 0,
+}
+
+# 兼容旧代码的红场高度表别名；内部逻辑使用 get_stair_height_by_id()。
+STAIR_HEIGHT_BY_ID = STAIR_HEIGHT_BY_ID_RED
 
 
 def get_position_lib():
@@ -59,44 +98,126 @@ def get_stair_side_length():
     return float(getattr(position_lib, "STAIR_SIDE_LENGTH", STAIR_SIDE_LENGTH))
 
 
+def get_stair_height_map(is_blue_field=None):
+    if is_blue_field is None:
+        is_blue_field = position_backend.is_blue_field()
+    return STAIR_HEIGHT_BY_ID_BLUE if is_blue_field else STAIR_HEIGHT_BY_ID_RED
+
+
+def get_stair_height_by_id(stair_id, is_blue_field=None):
+    return get_stair_height_map(is_blue_field=is_blue_field).get(int(stair_id))
+
+
+def _relation_by_height(from_id, to_id, is_blue_field=None):
+    from_height = get_stair_height_by_id(from_id, is_blue_field=is_blue_field)
+    to_height = get_stair_height_by_id(to_id, is_blue_field=is_blue_field)
+    if from_height is None or to_height is None:
+        return 0
+    if to_height > from_height:
+        return 1
+    if to_height < from_height:
+        return 2
+    return 0
+
+
+def _find_neighbor_id(rows, expected_x, expected_y, tolerance):
+    for candidate in rows:
+        candidate_x = float(candidate[4])
+        candidate_y = float(candidate[5])
+        if (
+            abs(candidate_x - expected_x) <= tolerance
+            and abs(candidate_y - expected_y) <= tolerance
+        ):
+            return int(candidate[0])
+    return None
+
+
+def _fill_stair_relation_columns(rows, side, is_blue_field=False):
+    """
+    按当前红/蓝半场方向语义填充矩阵第 1/2/3 列。
+    第 4 方向仍由 get_stair_height_relation(...) 按坐标反查。
+    """
+    side = float(side)
+    tolerance = side * 0.2
+    if is_blue_field:
+        direction_to_delta = {
+            1: (0.0, -side),
+            2: (side, 0.0),
+            3: (-side, 0.0),
+        }
+    else:
+        direction_to_delta = {
+            1: (0.0, side),
+            2: (-side, 0.0),
+            3: (side, 0.0),
+        }
+
+    filled_rows = []
+    for row in rows:
+        stair_id = int(row[0])
+        current_x = float(row[4])
+        current_y = float(row[5])
+        filled_row = list(row)
+        for direction, (delta_x, delta_y) in direction_to_delta.items():
+            neighbor_id = _find_neighbor_id(
+                rows,
+                current_x + delta_x,
+                current_y + delta_y,
+                tolerance,
+            )
+            filled_row[direction] = (
+                0
+                if neighbor_id is None
+                else _relation_by_height(
+                    stair_id,
+                    neighbor_id,
+                    is_blue_field=is_blue_field,
+                )
+            )
+        filled_rows.append(filled_row)
+    return filled_rows
+
+
 def build_stair_height_relation_matrix_red(entrance_x, entrance_y, side):
-    return [
-        [-1, 1, 0, 0, entrance_x - side, entrance_y],
-        [1, 1, 0, 2, entrance_x, entrance_y + side],
-        [2, 1, 1, 1, entrance_x, entrance_y],
-        [3, 2, 2, 0, entrance_x, entrance_y - side],
-        [4, 2, 0, 2, entrance_x + side, entrance_y + side],
-        [5, 1, 1, 2, entrance_x + side, entrance_y],
-        [6, 1, 1, 0, entrance_x + side, entrance_y - side],
-        [7, 2, 0, 1, entrance_x + 2 * side, entrance_y + side],
-        [8, 2, 2, 2, entrance_x + 2 * side, entrance_y],
-        [9, 2, 1, 0, entrance_x + 2 * side, entrance_y - side],
-        [10, 2, 0, 1, entrance_x + 3 * side, entrance_y + side],
-        [11, 0, 2, 2, entrance_x + 3 * side, entrance_y],
-        [12, 2, 1, 0, entrance_x + 3 * side, entrance_y - side],
-        [13, 0, 0, 0, entrance_x + 4 * side, entrance_y + side],
-        [15, 0, 0, 0, entrance_x + 4 * side, entrance_y - side],
+    rows = [
+        [-1, 0, 0, 0, entrance_x, entrance_y - side],
+        [1, 0, 0, 0, entrance_x - side, entrance_y],
+        [2, 0, 0, 0, entrance_x, entrance_y],
+        [3, 0, 0, 0, entrance_x + side, entrance_y],
+        [4, 0, 0, 0, entrance_x - side, entrance_y + side],
+        [5, 0, 0, 0, entrance_x, entrance_y + side],
+        [6, 0, 0, 0, entrance_x + side, entrance_y + side],
+        [7, 0, 0, 0, entrance_x - side, entrance_y + 2 * side],
+        [8, 0, 0, 0, entrance_x, entrance_y + 2 * side],
+        [9, 0, 0, 0, entrance_x + side, entrance_y + 2 * side],
+        [10, 0, 0, 0, entrance_x - side, entrance_y + 3 * side],
+        [11, 0, 0, 0, entrance_x, entrance_y + 3 * side],
+        [12, 0, 0, 0, entrance_x + side, entrance_y + 3 * side],
+        [13, 0, 0, 0, entrance_x - side, entrance_y + 4 * side],
+        [15, 0, 0, 0, entrance_x + side, entrance_y + 4 * side],
     ]
+    return _fill_stair_relation_columns(rows, side, is_blue_field=False)
 
 
 def build_stair_height_relation_matrix_blue(entrance_x, entrance_y, side):
-    return [
-        [-1, 1, 0, 0, entrance_x - side, entrance_y],
-        [1, 1, 2, 0, entrance_x, entrance_y - side],
-        [2, 1, 1, 1, entrance_x, entrance_y],
-        [3, 2, 0, 2, entrance_x, entrance_y + side],
-        [4, 2, 2, 0, entrance_x + side, entrance_y - side],
-        [5, 1, 2, 1, entrance_x + side, entrance_y],
-        [6, 1, 0, 1, entrance_x + side, entrance_y + side],
-        [7, 2, 1, 0, entrance_x + 2 * side, entrance_y - side],
-        [8, 2, 2, 2, entrance_x + 2 * side, entrance_y],
-        [9, 2, 0, 1, entrance_x + 2 * side, entrance_y + side],
-        [10, 2, 1, 0, entrance_x + 3 * side, entrance_y - side],
-        [11, 0, 2, 2, entrance_x + 3 * side, entrance_y],
-        [12, 2, 0, 1, entrance_x + 3 * side, entrance_y + side],
-        [13, 0, 0, 0, entrance_x + 4 * side, entrance_y - side],
-        [15, 0, 0, 0, entrance_x + 4 * side, entrance_y + side],
+    rows = [
+        [-1, 0, 0, 0, entrance_x, entrance_y - side],
+        [1, 0, 0, 0, entrance_x + side, entrance_y],
+        [2, 0, 0, 0, entrance_x, entrance_y],
+        [3, 0, 0, 0, entrance_x - side, entrance_y],
+        [4, 0, 0, 0, entrance_x + side, entrance_y + side],
+        [5, 0, 0, 0, entrance_x, entrance_y + side],
+        [6, 0, 0, 0, entrance_x - side, entrance_y + side],
+        [7, 0, 0, 0, entrance_x + side, entrance_y + 2 * side],
+        [8, 0, 0, 0, entrance_x, entrance_y + 2 * side],
+        [9, 0, 0, 0, entrance_x - side, entrance_y + 2 * side],
+        [10, 0, 0, 0, entrance_x + side, entrance_y + 3 * side],
+        [11, 0, 0, 0, entrance_x, entrance_y + 3 * side],
+        [12, 0, 0, 0, entrance_x - side, entrance_y + 3 * side],
+        [13, 0, 0, 0, entrance_x + side, entrance_y + 4 * side],
+        [15, 0, 0, 0, entrance_x - side, entrance_y + 4 * side],
     ]
+    return _fill_stair_relation_columns(rows, side, is_blue_field=True)
 
 
 def build_stair_height_relation_matrix():
@@ -104,9 +225,10 @@ def build_stair_height_relation_matrix():
     按当前 position 后端的入口坐标生成台阶关系矩阵。
 
     每行格式:
-    [阶梯编号, 前方关系, +90deg方向关系, -90deg方向关系, row, col]
+    [阶梯编号, direction1关系, direction2关系, direction3关系, map_x, map_y]
     关系值: 0=该方向没有衔接台阶, 1=该方向台阶比当前台阶高, 2=该方向台阶比当前台阶低。
-    方向语义: 1=前方, 2=+90deg, 3=-90deg。
+    当前方向语义由红/蓝半场决定，详见 tools.direction_int_to_yaw_deg()
+    和 tools.stair_id_to_direction()。
     """
     entrance_x = get_entrance_x()
     entrance_y = get_entrance_y()
@@ -161,35 +283,58 @@ def get_stair_height_relation(stair_id, direction):
       0: 不相邻/无衔接
       1: 该方向台阶比当前台阶高
       2: 该方向台阶比当前台阶低
+
+    本函数按当前红/蓝半场方向语义查找目标邻格，不直接使用矩阵第 1/2/3
+    列，避免地图坐标系和方向语义调整后矩阵列含义滞后。
     """
+    stair_id = int(stair_id)
     direction = int(direction)
     if direction not in (1, 2, 3, 4):
         raise ValueError(f"direction must be 1, 2, 3 or 4, got {direction}")
 
     _, stair_row = get_stair_matrix_row(stair_id)
-    if direction in (1, 2, 3):
-        return int(stair_row[direction])
-
     current_x = float(stair_row[4])
     current_y = float(stair_row[5])
     stair_matrix = get_stair_matrix()
     stair_side_length = get_stair_side_length()
-    expected_x = current_x - stair_side_length
-    expected_y = current_y
+    if position_backend.is_blue_field():
+        direction_to_delta = {
+            1: (0.0, -stair_side_length),
+            2: (stair_side_length, 0.0),
+            3: (-stair_side_length, 0.0),
+            4: (0.0, stair_side_length),
+        }
+    else:
+        direction_to_delta = {
+            1: (0.0, stair_side_length),
+            2: (-stair_side_length, 0.0),
+            3: (stair_side_length, 0.0),
+            4: (0.0, -stair_side_length),
+        }
+    delta_x, delta_y = direction_to_delta[direction]
+    expected_x = current_x + delta_x
+    expected_y = current_y + delta_y
     tolerance = stair_side_length * 0.2
 
+    current_height = get_stair_height_by_id(stair_id)
+    if current_height is None:
+        return 0
+
     for candidate in stair_matrix:
+        candidate_id = int(candidate[0])
         candidate_x = float(candidate[4])
         candidate_y = float(candidate[5])
         if (
             abs(candidate_x - expected_x) <= tolerance
             and abs(candidate_y - expected_y) <= tolerance
         ):
-            candidate_front_relation = int(candidate[1])
-            if candidate_front_relation == 1:
-                return 2
-            if candidate_front_relation == 2:
+            candidate_height = get_stair_height_by_id(candidate_id)
+            if candidate_height is None:
+                return 0
+            if candidate_height > current_height:
                 return 1
+            if candidate_height < current_height:
+                return 2
             return 0
     return 0
 
@@ -440,6 +585,23 @@ class PositionRuntime:
                 "x": float(self._latest_robot_pose["x"]),
                 "y": float(self._latest_robot_pose["y"]),
                 "z": float(self._latest_robot_pose["z"]),
+            }
+
+    def get_current_position_sample(self):
+        """
+        原子读取当前位置及其更新时间，供需要按真实新帧计数的逻辑使用。
+        """
+        with self._lock:
+            if (
+                self._latest_robot_pose is None
+                or self._latest_update_time is None
+            ):
+                return None
+            return {
+                "x": float(self._latest_robot_pose["x"]),
+                "y": float(self._latest_robot_pose["y"]),
+                "z": float(self._latest_robot_pose["z"]),
+                "update_time": float(self._latest_update_time),
             }
 
     def get_weapon_pose(self, max_tf_age_sec=0.25):

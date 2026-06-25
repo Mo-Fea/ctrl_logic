@@ -13,19 +13,19 @@ MID360_ROBOT_ODOM_TOPIC = "/lio/robo/odom"
 MID360_LIDAR_ODOM_TOPIC = "/lio/odom"
 
 
-ENTRANCE_X = 2.92
-ENTRANCE_Y = 0.92
-PRE_ENTRANCE_X = 1.80
-PRE_ENTRANCE_Y = 0.957
+ENTRANCE_X = -2.92
+ENTRANCE_Y = -0.92
+PRE_ENTRANCE_X = -1.80
+PRE_ENTRANCE_Y = -0.957
 WEAPON_TARGETS = {
-    1: (-0.32, 4.12),
-    2: (-0.12, 4.12),
-    3: (0.074, 4.12),
-    4: (0.275, 4.12),
-    5: (0.483, 4.12),
-    6: (0.681, 4.12),
+    1: (0.32, -4.12),
+    2: (0.12, -4.12),
+    3: (-0.074, -4.12),
+    4: (-0.275, -4.12),
+    5: (-0.483, -4.12),
+    6: (-0.681, -4.12),
 }
-WEAPON_RETREAT_STOP_Y = 4.00
+WEAPON_RETREAT_STOP_Y = -4.00
 
 
 IMU_TO_LIDAR_X = -0.011  # m, /lio/odom(imu) 到 lidar 的x方向外参

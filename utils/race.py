@@ -29,12 +29,13 @@ def _import_matplotlib():
 # 12. 在路径尽可能短的情况下完成路径规划
 # ============================================
 
-# 位置编号 → (x_index, y_index, height)
-# 与 lib2/module.py 的梅林矩阵保持一致：
-#   x+ 方向为前方，方向码 1
-#   y+ 方向为 +90deg/左，方向码 2
-#   y- 方向为 -90deg/右，方向码 3
-#   x- 方向为后方，方向码 4
+# 位置编号 → (forward_index, left_index, height)
+# 这里是与真实地图轴解耦的逻辑网格：
+#   forward_index+ 为方向码1
+#   left_index+ 为方向码2
+#   left_index- 为方向码3
+#   forward_index- 为方向码4
+# 真实地图中的方向映射统一由 lib2/tools.py 处理。
 # 颜色：20-深绿色   40-正常绿    60-浅绿色
 #
 # 地图布局：

@@ -368,6 +368,8 @@ def move_to_des(
             return None
 
     return {
+        "completed": True,
+        "failed_step": None,
         "target_yaw_deg": None if target_deg is None else float(move_lib.normalize_yaw_deg(target_deg)),
         "fixed_yaw_deg": None if target_deg is None else float(move_lib.normalize_yaw_deg(target_deg)),
         "reference": reference,
@@ -450,6 +452,8 @@ def move_backward_to_des(
             return None
 
     return {
+        "completed": True,
+        "failed_step": None,
         "target_yaw_deg": None if target_deg is None else float(move_lib.normalize_yaw_deg(target_deg)),
         "backward_target_yaw_deg": None if target_deg is None else float(move_lib.normalize_yaw_deg(target_deg + 180.0)),
         "fixed_yaw_deg": None if target_deg is None else float(move_lib.normalize_yaw_deg(target_deg)),
@@ -486,6 +490,58 @@ def move_weapon_to_des(
     )
 
 
+def meilin_prepare(
+    sender,
+    position_runtime,
+    odom_runtime,
+    v=500,
+    total_timeout_sec=None,
+    final_direction_timeout_sec=None,
+    move_timeout_sec=None,
+    reference="robot",
+):
+    """
+    梅林动作测试准备。
+
+    移动到当前半场编号为 -1 的台阶：
+      - 红半场：朝向方向 1，即 90deg。
+      - 蓝半场：朝向方向 4，即 -90deg。
+
+    yaw 统一通过 tools.direction_int_to_yaw_deg(...) 获取，避免直接写死
+    0/90/180/-90。
+    """
+    stair_id = -1
+    target_direction = 4 if position_backend.is_blue_field() else 1
+    target_yaw_deg = tools.direction_int_to_yaw_deg(target_direction)
+    target_x, target_y = get_stair_xy(stair_id)
+
+    move_result = move_to_des(
+        sender=sender,
+        position_runtime=position_runtime,
+        odom_runtime=odom_runtime,
+        x=target_x,
+        y=target_y,
+        target_deg=target_yaw_deg,
+        v=v,
+        final_direction_timeout_sec=final_direction_timeout_sec,
+        move_timeout_sec=move_timeout_sec,
+        total_timeout_sec=total_timeout_sec,
+        reference=reference,
+    )
+
+    return {
+        "completed": move_result is not None
+        and bool(move_result.get("completed", False)),
+        "failed_step": None if move_result is not None else "meilin_prepare_move",
+        "stair_id": int(stair_id),
+        "target_direction": int(target_direction),
+        "target_x": float(target_x),
+        "target_y": float(target_y),
+        "target_yaw_deg": float(target_yaw_deg),
+        "move_result": move_result,
+    }
+
+
 def adjust_position(
     sender,
     position_runtime,
@@ -512,16 +568,25 @@ def adjust_position(
       再使用该行的 x/y 作为微调起点。
 
     direction:
-      1: current_x + adjust_distance
-      2: current_y + adjust_distance
-      3: current_y - adjust_distance
-      4: current_x - adjust_distance
+      红场坐标偏移:
+        1: current_y + adjust_distance
+        2: current_x - adjust_distance
+        3: current_x + adjust_distance
+        4: current_y - adjust_distance
+      蓝场坐标偏移:
+        1: current_y - adjust_distance
+        2: current_x + adjust_distance
+        3: current_x - adjust_distance
+        4: current_y + adjust_distance
 
     height_relation:
-      1: 微调方向台阶较高，先旋转到目标航向，再 ch2=200 前进 2s，完成微调。
+      1: 微调方向台阶较高，先旋转到目标航向，再 ch2=300 前进 1s，完成微调。
       2: 微调方向台阶较低，执行原来的按坐标微调逻辑。
 
     direction 同时通过 tools.direction_int_to_yaw_deg(...) 转成微调过程中的目标航向角。
+    当前实测关系:
+      红场 0.01deg=x+，90deg=y+。
+      蓝场 0.01deg=x+，-90deg=y+。
     """
     move_type = int(move_type)
     direction = int(direction)
@@ -557,13 +622,31 @@ def adjust_position(
         )
         drive_result = move_lib.drive_with_channels_for_duration(
             sender=sender,
-            duration_sec=2.0,
-            forward_cmd=200,
+            duration_sec=1.0,
+            forward_cmd=500,
             target_yaw_deg=target_deg,
             brake_reverse_cmd=0,
             brake_duration_sec=0.0,
         )
+        rotate_completed = bool(
+            rotate_result is not None
+            and not rotate_result.get("timed_out", False)
+        )
+        drive_completed = bool(
+            drive_result is not None
+            and drive_result.get("completed", False)
+        )
         return {
+            "completed": rotate_completed and drive_completed,
+            "failed_step": (
+                None
+                if rotate_completed and drive_completed
+                else (
+                    "rotate_before_adjust"
+                    if not rotate_completed
+                    else "timed_forward_adjust"
+                )
+            ),
             "move_type": int(move_type),
             "direction": int(direction),
             "height_relation": int(height_relation),
@@ -580,16 +663,24 @@ def adjust_position(
             "move_result": drive_result,
         }
 
-    if direction == 1:
-        adjust_x += adjust_distance
-    elif direction == 2:
-        adjust_y += adjust_distance
-    elif direction == 3:
-        adjust_y -= adjust_distance
-    elif direction == 4:
-        adjust_x -= adjust_distance
+    if position_backend.is_blue_field():
+        direction_to_delta = {
+            1: (0.0, -adjust_distance),
+            2: (adjust_distance, 0.0),
+            3: (-adjust_distance, 0.0),
+            4: (0.0, adjust_distance),
+        }
     else:
-        raise ValueError(f"direction must be 1, 2, 3 or 4, got {direction}")
+        direction_to_delta = {
+            1: (0.0, adjust_distance),
+            2: (-adjust_distance, 0.0),
+            3: (adjust_distance, 0.0),
+            4: (0.0, -adjust_distance),
+        }
+
+    adjust_dx, adjust_dy = direction_to_delta[direction]
+    adjust_x += adjust_dx
+    adjust_y += adjust_dy
 
     if move_type == 1:
         move_result = move_to_des(
@@ -621,6 +712,8 @@ def adjust_position(
         raise ValueError(f"move_type must be 1(forward) or 2(backward), got {move_type}")
 
     return {
+        "completed": move_result is not None,
+        "failed_step": None if move_result is not None else "coordinate_adjust_move",
         "move_type": int(move_type),
         "direction": int(direction),
         "height_relation": int(height_relation),
@@ -631,6 +724,8 @@ def adjust_position(
         "current_y": float(current_y),
         "adjust_x": float(adjust_x),
         "adjust_y": float(adjust_y),
+        "adjust_dx": float(adjust_dx),
+        "adjust_dy": float(adjust_dy),
         "adjust_distance": float(adjust_distance),
         "move_result": move_result,
     }
@@ -747,31 +842,27 @@ def side_suck(
     position_runtime,
     odom_runtime,
     target_stair_id,
-    adjust_distance=PRE_DESCEND_ADJUST_DISTANCE,
-    move_speed=600,
+    adjust_distance=0.2,
+    move_speed=200,
     lateral_distance=1.1,
     post_move_wait_sec=0.5,
 ):
     """
-    场外侧吸组合动作（当前仅实现第一阶段）。
+    场外侧吸组合动作。
 
-    1. 从 -1 号台阶沿方向 1 正向微调：
-       move_type=1, direction=1, stair_id=-1, height_relation=2。
-    2. 微调成功后，先按当前 kfs.suck_count 选择气缸。
-    3. target_stair_id=1 时：
+    1. 按原 target_stair_id/suck_count 分支旋转吸盘头：
+       target_stair_id=1 时：
        - suck_count=1：将吸盘头旋转到 90deg。
        - suck_count=2：将吸盘头旋转到 -90deg。
-    4. target_stair_id=3 时：
+       target_stair_id=3 时：
        - suck_count=1：将吸盘头旋转到 -90deg。
        - suck_count=2：将吸盘头旋转到 90deg。
-    5. 吸盘头旋转完成后触发 pose_id=5 侧吸姿态。
-    6. 侧吸姿态完成后使用 pose_id=5 触发当前已选气缸的吸取边沿。
-    7. 读取机器人实时坐标，保持 x 不变并以 0.01deg 为目标航向平移：
-       - target_stair_id=1：y + lateral_distance。
-       - target_stair_id=3：y - lateral_distance。
-    8. 平移完成后等待 post_move_wait_sec，默认 0.5s。
-    9. 启动 KFS 异步收尾线程，同时将底盘移动回 -1 号台阶中心，
-       回程目标航向为 0.01deg。
+    2. 切换到 side_pose。
+    3. 按当前 suck_count 选择气缸。
+    4. 执行 move.side_suck_movement(...) 到侧吸准备位，并进行高位前进微调。
+    5. 启动已选择气缸吸取。
+    6. 执行 move.side_suck_lateral_movement(...) 定时左右平移。
+    7. 移动回编号 -1 的台阶中心。
 
     target_stair_id 只允许 1 或 3；suck_count 由气缸选择方法校验。
     """
@@ -786,37 +877,7 @@ def side_suck(
             f"target_stair_id must be 1 or 3, got {target_stair_id}"
         )
 
-    adjust_result = adjust_position(
-        sender=sender,
-        position_runtime=position_runtime,
-        odom_runtime=odom_runtime,
-        move_type=1,
-        direction=1,
-        stair_id=-1,
-        height_relation=2,
-        adjust_distance=adjust_distance,
-        move_speed=move_speed,
-    )
-    if adjust_result.get("move_result") is None:
-        return {
-            "completed": False,
-            "implemented": True,
-            "failed_step": "adjust_position",
-            "target_stair_id": int(target_stair_id),
-            "suck_count": int(kfs.suck_count),
-            "adjust_result": adjust_result,
-            "sucker_rotation_result": None,
-            "cylinder_selection_result": None,
-            "side_pose_result": None,
-            "suction_result": None,
-            "lateral_move_result": None,
-            "post_suction_thread": None,
-            "return_move_result": None,
-        }
-
     suck_count = int(kfs.suck_count)
-    cylinder_selection_result = kfs.sucker_select_cylinder(sender)
-
     if (target_stair_id, suck_count) in ((1, 1), (3, 2)):
         sucker_rotation_result = kfs.sucker_90deg(sender)
     elif (target_stair_id, suck_count) in ((1, 2), (3, 1)):
@@ -828,10 +889,10 @@ def side_suck(
             "failed_step": "side_suck_branch_not_implemented",
             "target_stair_id": int(target_stair_id),
             "suck_count": int(suck_count),
-            "adjust_result": adjust_result,
             "sucker_rotation_result": None,
-            "cylinder_selection_result": cylinder_selection_result,
             "side_pose_result": None,
+            "cylinder_selection_result": None,
+            "side_suck_movement_result": None,
             "suction_result": None,
             "lateral_move_result": None,
             "post_suction_thread": None,
@@ -839,64 +900,60 @@ def side_suck(
         }
 
     side_pose_result = kfs.kfs_side_pose(sender)
+    cylinder_selection_result = kfs.sucker_select_cylinder(sender)
+
+    side_suck_movement_result = move_lib.side_suck_movement(
+        sender=sender,
+        position_runtime=position_runtime,
+        odom_runtime=odom_runtime,
+        target_stair_id=target_stair_id,
+        lateral_distance=0.5,
+        cruise_forward_cmd=move_speed,
+        adjust_forward_cmd=300,
+        adjust_duration_sec=1.0,
+        reference="robot",
+    )
+    if not side_suck_movement_result.get("completed", False):
+        return {
+            "completed": False,
+            "implemented": True,
+            "failed_step": "side_suck_movement",
+            "target_stair_id": int(target_stair_id),
+            "suck_count": int(suck_count),
+            "sucker_rotation_result": sucker_rotation_result,
+            "side_pose_result": side_pose_result,
+            "cylinder_selection_result": cylinder_selection_result,
+            "side_suck_movement_result": side_suck_movement_result,
+            "suction_result": None,
+            "lateral_move_result": None,
+            "post_suction_thread": None,
+            "return_move_result": None,
+        }
+
     suction_result = set_kfs_suction(
         sender=sender,
         suction_on=True,
         pose_id=5,
     )
 
-    robot_pose = position_runtime.get_robot_pose()
-    if robot_pose is None:
-        return {
-            "completed": False,
-            "implemented": True,
-            "failed_step": "get_robot_pose_before_lateral_move",
-            "target_stair_id": int(target_stair_id),
-            "suck_count": int(suck_count),
-            "adjust_result": adjust_result,
-            "sucker_rotation_result": sucker_rotation_result,
-            "cylinder_selection_result": cylinder_selection_result,
-            "side_pose_result": side_pose_result,
-            "suction_result": suction_result,
-            "lateral_move_result": None,
-            "post_suction_thread": None,
-            "return_move_result": None,
-        }
-
-    current_x = float(robot_pose["x"])
-    current_y = float(robot_pose["y"])
-    lateral_distance = abs(float(lateral_distance))
-    target_y = (
-        current_y + lateral_distance
-        if target_stair_id == 1
-        else current_y - lateral_distance
-    )
-    lateral_move_result = move_to_des(
+    target_yaw_deg = side_suck_movement_result.get("target_yaw_deg")
+    lateral_move_result = move_lib.side_suck_lateral_movement(
         sender=sender,
-        position_runtime=position_runtime,
-        odom_runtime=odom_runtime,
-        x=current_x,
-        y=target_y,
-        target_deg=0.01,
-        v=move_speed,
+        target_stair_id=target_stair_id,
+        target_yaw_deg=target_yaw_deg,
     )
-    if lateral_move_result is None:
+    if not lateral_move_result.get("completed", False):
         return {
             "completed": False,
             "implemented": True,
-            "failed_step": "lateral_move",
+            "failed_step": "side_suck_lateral_movement",
             "target_stair_id": int(target_stair_id),
             "suck_count": int(suck_count),
-            "adjust_result": adjust_result,
             "sucker_rotation_result": sucker_rotation_result,
             "cylinder_selection_result": cylinder_selection_result,
             "side_pose_result": side_pose_result,
             "suction_result": suction_result,
-            "lateral_move_target": {
-                "x": current_x,
-                "y": target_y,
-                "yaw_deg": 0.01,
-            },
+            "side_suck_movement_result": side_suck_movement_result,
             "lateral_move_result": lateral_move_result,
             "post_suction_thread": None,
             "return_move_result": None,
@@ -914,7 +971,7 @@ def side_suck(
         odom_runtime=odom_runtime,
         x=return_x,
         y=return_y,
-        target_deg=0.01,
+        target_deg=target_yaw_deg,
         v=move_speed,
     )
     if return_move_result is None:
@@ -924,16 +981,11 @@ def side_suck(
             "failed_step": "return_to_stair_minus_one",
             "target_stair_id": int(target_stair_id),
             "suck_count": int(suck_count),
-            "adjust_result": adjust_result,
             "sucker_rotation_result": sucker_rotation_result,
             "cylinder_selection_result": cylinder_selection_result,
             "side_pose_result": side_pose_result,
             "suction_result": suction_result,
-            "lateral_move_target": {
-                "x": current_x,
-                "y": target_y,
-                "yaw_deg": 0.01,
-            },
+            "side_suck_movement_result": side_suck_movement_result,
             "lateral_move_result": lateral_move_result,
             "post_move_wait_sec": float(post_move_wait_sec),
             "post_suction_thread": post_suction_thread,
@@ -941,7 +993,7 @@ def side_suck(
                 "stair_id": -1,
                 "x": float(return_x),
                 "y": float(return_y),
-                "yaw_deg": 0.01,
+                "yaw_deg": float(target_yaw_deg),
             },
             "return_move_result": return_move_result,
         }
@@ -952,16 +1004,11 @@ def side_suck(
         "failed_step": None,
         "target_stair_id": int(target_stair_id),
         "suck_count": int(suck_count),
-        "adjust_result": adjust_result,
         "sucker_rotation_result": sucker_rotation_result,
         "cylinder_selection_result": cylinder_selection_result,
         "side_pose_result": side_pose_result,
         "suction_result": suction_result,
-        "lateral_move_target": {
-            "x": current_x,
-            "y": target_y,
-            "yaw_deg": 0.01,
-        },
+        "side_suck_movement_result": side_suck_movement_result,
         "lateral_move_result": lateral_move_result,
         "post_move_wait_sec": float(post_move_wait_sec),
         "post_suction_thread": post_suction_thread,
@@ -969,7 +1016,7 @@ def side_suck(
             "stair_id": -1,
             "x": float(return_x),
             "y": float(return_y),
-            "yaw_deg": 0.01,
+            "yaw_deg": float(target_yaw_deg),
         },
         "return_move_result": return_move_result,
     }
@@ -1014,7 +1061,7 @@ def fetch_and_store_kfs(
         adjust_distance=adjust_distance,
         move_speed=move_speed,
     )
-    if adjust_result["move_result"] is None:
+    if not adjust_result.get("completed", False):
         return {
             "completed": False,
             "failed_step": "adjust_position",
@@ -1130,31 +1177,32 @@ def fetch_weapon(
 
     if position_backend.is_blue_field():
         if final_target_yaw_deg is None:
-            final_target_yaw_deg = 90.0
+            final_target_yaw_deg = 180.0
         if first_rotate_yaw_deg is None:
-            first_rotate_yaw_deg = 90.0
+            first_rotate_yaw_deg = 180.0
         if return_move_yaw_deg is None:
-            return_move_yaw_deg = 90.0
+            return_move_yaw_deg = 180.0
         if release_rotate_yaw_deg is None:
-            release_rotate_yaw_deg = -90.0
+            release_rotate_yaw_deg = 0.01
     else:
         if final_target_yaw_deg is None:
-            final_target_yaw_deg = -90.0
+            final_target_yaw_deg = 0.01
         if first_rotate_yaw_deg is None:
-            first_rotate_yaw_deg = -90.0
+            first_rotate_yaw_deg = 0.01
         if return_move_yaw_deg is None:
-            return_move_yaw_deg = -90.0
+            return_move_yaw_deg = 0.01
         if release_rotate_yaw_deg is None:
-            release_rotate_yaw_deg = 90.0
+            release_rotate_yaw_deg = 180.0
 
-    approach_x = float(des_x)
-    approach_offset_y = abs(float(weapon_approach_offset_y))
+    approach_offset = abs(float(weapon_approach_offset_y))
     if position_backend.is_blue_field():
-        approach_y = float(des_y) + approach_offset_y
-        approach_offset_direction = 1
-    else:
-        approach_y = float(des_y) - approach_offset_y
+        approach_x = float(des_x) - approach_offset
+        approach_y = float(des_y)
         approach_offset_direction = -1
+    else:
+        approach_x = float(des_x) + approach_offset
+        approach_y = float(des_y)
+        approach_offset_direction = 1
 
     return_move_x = float(approach_x)
     return_move_y = float(approach_y)
@@ -1167,8 +1215,8 @@ def fetch_weapon(
                 f"blue return weapon_id {blue_return_weapon_id} is not in {valid_weapon_ids}"
             )
         return_weapon_x, return_weapon_y = weapon_targets[blue_return_weapon_id]
-        return_move_x = float(return_weapon_x)
-        return_move_y = float(return_weapon_y) + approach_offset_y
+        return_move_x = float(return_weapon_x) - approach_offset
+        return_move_y = float(return_weapon_y)
         return_move_reference_weapon_id = int(blue_return_weapon_id)
 
     # 第一段：用 weapon/夹爪参考点，按当前半场目标航向先移动到 weapon 目标点前方 1m。
@@ -1195,7 +1243,8 @@ def fetch_weapon(
                 "x": float(approach_x),
                 "y": float(approach_y),
                 "yaw_deg": float(first_rotate_yaw_deg),
-                "offset_y": float(approach_offset_y),
+                "offset_distance": float(approach_offset),
+                "offset_axis": "x",
                 "offset_direction": int(approach_offset_direction),
             },
             "approach_move_result": approach_move_result,
@@ -1226,7 +1275,8 @@ def fetch_weapon(
                 "x": float(approach_x),
                 "y": float(approach_y),
                 "yaw_deg": float(first_rotate_yaw_deg),
-                "offset_y": float(approach_offset_y),
+                "offset_distance": float(approach_offset),
+                "offset_axis": "x",
                 "offset_direction": int(approach_offset_direction),
             },
             "approach_move_result": approach_move_result,
@@ -1245,7 +1295,8 @@ def fetch_weapon(
     )
 
     # 第三段：保持夹取状态，以机器人参考点返回指定接近点。
-    # 蓝场使用 1 号 weapon 坐标的 (x, y+1)，红/蓝场默认返回朝向分别为 -90/90deg。
+    # 蓝场使用 1 号 weapon 坐标的当前地图 x- 接近点；
+    # 当前地图坐标系下，红/蓝场默认返回朝向分别为 0.01/180deg。
     return_move_result = move_lib.move_to_target(
         sender=sender,
         position_runtime=position_runtime,
@@ -1288,7 +1339,8 @@ def fetch_weapon(
             "x": float(approach_x),
             "y": float(approach_y),
             "yaw_deg": float(first_rotate_yaw_deg),
-            "offset_y": float(approach_offset_y),
+            "offset_distance": float(approach_offset),
+            "offset_axis": "x",
             "offset_direction": int(approach_offset_direction),
         },
         "approach_move_result": approach_move_result,
@@ -1333,13 +1385,14 @@ def climb(
     pre_climb_forward_cmd=300,
     pre_climb_duration_sec=3.0,
     move_speed=600,
+    return_to_center=True,
 ):
     """
     组合式上楼梯动作：
     1. direction1/direction2 转成 des_deg1/des_deg2
     2. 调用高位微调逻辑完成上楼前对正和前探
     3. 调用 move.climb(...) 阻塞执行半自动上楼梯
-    4. 调用 move_to_des(...) 移动到目标点 (x, y)，最终朝向 des_deg2
+    4. return_to_center=True 时调用 move_to_des(...) 移动到目标点 (x, y)，最终朝向 des_deg2
     """
     des_deg1 = tools.direction_int_to_yaw_deg(direction1)
     des_deg2 = tools.direction_int_to_yaw_deg(direction2)
@@ -1360,15 +1413,35 @@ def climb(
         position_runtime=position_runtime,
     )
 
-    move_result = move_to_des(
-        sender=sender,
-        position_runtime=position_runtime,
-        odom_runtime=odom_runtime,
-        x=x,
-        y=y,
-        target_deg=des_deg2,
-        v=STAIR_MOVE_MAX_CMD,
+    return_to_center = bool(return_to_center)
+    move_result = None
+    if return_to_center:
+        move_result = move_to_des(
+            sender=sender,
+            position_runtime=position_runtime,
+            odom_runtime=odom_runtime,
+            x=x,
+            y=y,
+            target_deg=des_deg2,
+            v=STAIR_MOVE_MAX_CMD,
+        )
+
+    pre_climb_completed = bool(
+        pre_climb_adjust_result.get("completed", False)
     )
+    climb_completed = bool(
+        climb_result is not None
+        and climb_result.get("success", False)
+    )
+    move_completed = True if not return_to_center else move_result is not None
+    completed = pre_climb_completed and climb_completed and move_completed
+    failed_step = None
+    if not pre_climb_completed:
+        failed_step = "pre_climb_adjust"
+    elif not climb_completed:
+        failed_step = "climb_trigger"
+    elif not move_completed:
+        failed_step = "move_to_stair_center"
 
     return {
         "des_deg1": float(des_deg1),
@@ -1378,6 +1451,339 @@ def climb(
         "pre_climb_drive_result": pre_climb_adjust_result.get("drive_result"),
         "climb_result": climb_result,
         "move_result": move_result,
+        "return_to_center": bool(return_to_center),
+        "completed": bool(completed),
+        "failed_step": failed_step,
+    }
+
+
+def climb_R1(
+    sender,
+    position_runtime,
+    odom_runtime,
+    pre_climb_duration_sec=2.0,
+):
+    """
+    R1 专用上楼组合动作。
+
+    1. 面向 R1 爬坡方向：红场 180deg，蓝场 0.01deg。
+       按当前四方向函数均使用 direction=2。
+    2. 保持该航向，以 ch2=100 前进 pre_climb_duration_sec，默认 2s。
+    3. 调用 move.climb() 触发并等待底层上楼完成。
+    4. 上楼完成后停车并保持航向等待 4s。
+    5. 保持航向，以 ch2=50 前进 1s，随后停车并进入锁轮状态。
+    """
+    pre_climb_duration_sec = float(pre_climb_duration_sec)
+    if pre_climb_duration_sec < 0.0:
+        raise ValueError(
+            "pre_climb_duration_sec must be >= 0, "
+            f"got {pre_climb_duration_sec}"
+        )
+
+    climb_direction = 2
+    target_yaw_deg = tools.direction_int_to_yaw_deg(climb_direction)
+
+    rotate_result = move_lib.rotate_to_target_yaw_segmented(
+        sender=sender,
+        position_runtime=position_runtime,
+        odom_runtime=odom_runtime,
+        target_yaw_deg=target_yaw_deg,
+    )
+    if rotate_result is None or rotate_result.get("timed_out", False):
+        return {
+            "completed": False,
+            "failed_step": "rotate_to_climb_direction",
+            "climb_direction": int(climb_direction),
+            "target_yaw_deg": float(target_yaw_deg),
+            "pre_climb_duration_sec": float(pre_climb_duration_sec),
+            "rotate_result": rotate_result,
+        }
+
+    pre_climb_drive_result = move_lib.drive_with_channels_for_duration(
+        sender=sender,
+        duration_sec=pre_climb_duration_sec,
+        forward_cmd=100,
+        target_yaw_deg=target_yaw_deg,
+        brake_reverse_cmd=0,
+        brake_duration_sec=0.0,
+    )
+    if not pre_climb_drive_result.get("completed", False):
+        return {
+            "completed": False,
+            "failed_step": "pre_climb_forward",
+            "climb_direction": int(climb_direction),
+            "target_yaw_deg": float(target_yaw_deg),
+            "pre_climb_duration_sec": float(pre_climb_duration_sec),
+            "rotate_result": rotate_result,
+            "pre_climb_drive_result": pre_climb_drive_result,
+        }
+
+    climb_result = move_lib.climb(
+        sender=sender,
+        position_runtime=position_runtime,
+    )
+    if climb_result is None or not climb_result.get("success", False):
+        return {
+            "completed": False,
+            "failed_step": "climb_trigger",
+            "climb_direction": int(climb_direction),
+            "target_yaw_deg": float(target_yaw_deg),
+            "pre_climb_duration_sec": float(pre_climb_duration_sec),
+            "rotate_result": rotate_result,
+            "pre_climb_drive_result": pre_climb_drive_result,
+            "climb_result": climb_result,
+        }
+
+    post_climb_wait_result = move_lib.wait_with_target_yaw(
+        sender=sender,
+        duration_sec=4.0,
+        target_yaw_deg=target_yaw_deg,
+    )
+    post_climb_drive_result = move_lib.drive_with_channels_for_duration(
+        sender=sender,
+        duration_sec=1.0,
+        forward_cmd=50,
+        target_yaw_deg=target_yaw_deg,
+        brake_reverse_cmd=0,
+        brake_duration_sec=0.0,
+    )
+    lock_wheel_result = move_lib.lock_wheel(sender)
+    stop_yaw_pid_channels = move_lib.set_motion_channels(
+        sender,
+        des_yaw_i16=0,
+    )
+    completed = bool(
+        post_climb_wait_result.get("completed", False)
+        and post_climb_drive_result.get("completed", False)
+        and lock_wheel_result.get("completed", False)
+    )
+    failed_step = None
+    if not post_climb_wait_result.get("completed", False):
+        failed_step = "post_climb_wait"
+    elif not post_climb_drive_result.get("completed", False):
+        failed_step = "post_climb_forward"
+    elif not lock_wheel_result.get("completed", False):
+        failed_step = "lock_wheel"
+    return {
+        "completed": completed,
+        "failed_step": failed_step,
+        "climb_direction": int(climb_direction),
+        "target_yaw_deg": float(target_yaw_deg),
+        "pre_climb_duration_sec": float(pre_climb_duration_sec),
+        "pre_climb_forward_cmd": 100,
+        "post_climb_wait_sec": 4.0,
+        "post_climb_duration_sec": 1.0,
+        "post_climb_forward_cmd": 50,
+        "rotate_result": rotate_result,
+        "pre_climb_drive_result": pre_climb_drive_result,
+        "climb_result": climb_result,
+        "post_climb_wait_result": post_climb_wait_result,
+        "post_climb_drive_result": post_climb_drive_result,
+        "lock_wheel_result": lock_wheel_result,
+        "stop_yaw_pid_channels": stop_yaw_pid_channels,
+    }
+
+
+def high_score190(
+    sender,
+    position_runtime,
+    odom_runtime,
+):
+    """
+    190 分高分组合流程。
+
+    固定执行顺序：
+      1. move.climb_R1_movement(...)
+      2. climb_R1(...)
+      3. kfs.place_3rd_kfs(...)
+      4. kfs.sucker_release_pose(...)
+      5. kfs.place_3rd_kfs(...)
+
+    函数不接收额外业务输入，红蓝半场由各子流程根据 position_backend 自动判断。
+    任一步失败后立即返回，不继续执行后续硬件动作。
+    """
+    field_name = "blue" if position_backend.is_blue_field() else "red"
+    results = {
+        "field_name": field_name,
+        "suck_count_before": int(kfs.suck_count),
+    }
+
+    if int(kfs.suck_count) != 3:
+        return {
+            "completed": False,
+            "failed_step": "invalid_suck_count_before_high_score190",
+            "required_suck_count": 3,
+            **results,
+        }
+
+    climb_r1_movement_result = move_lib.climb_R1_movement(
+        sender=sender,
+        position_runtime=position_runtime,
+        odom_runtime=odom_runtime,
+    )
+    results["climb_r1_movement_result"] = climb_r1_movement_result
+    if not climb_r1_movement_result.get("completed", False):
+        return {
+            "completed": False,
+            "failed_step": "climb_R1_movement",
+            **results,
+        }
+
+    climb_r1_result = climb_R1(
+        sender=sender,
+        position_runtime=position_runtime,
+        odom_runtime=odom_runtime,
+    )
+    results["climb_r1_result"] = climb_r1_result
+    if not climb_r1_result.get("completed", False):
+        return {
+            "completed": False,
+            "failed_step": "climb_R1",
+            **results,
+        }
+
+    first_place_3rd_kfs_result = kfs.place_3rd_kfs(
+        sender=sender,
+        position_runtime=position_runtime,
+    )
+    results["first_place_3rd_kfs_result"] = first_place_3rd_kfs_result
+    if not first_place_3rd_kfs_result.get("completed", False):
+        return {
+            "completed": False,
+            "failed_step": "first_place_3rd_kfs",
+            "suck_count_after": int(kfs.suck_count),
+            **results,
+        }
+
+    sucker_release_pose_result = kfs.sucker_release_pose(sender)
+    results["sucker_release_pose_result"] = sucker_release_pose_result
+    if not sucker_release_pose_result.get("completed", False):
+        return {
+            "completed": False,
+            "failed_step": "sucker_release_pose",
+            "suck_count_after": int(kfs.suck_count),
+            **results,
+        }
+
+    second_place_3rd_kfs_result = kfs.place_3rd_kfs(
+        sender=sender,
+        position_runtime=position_runtime,
+    )
+    results["second_place_3rd_kfs_result"] = second_place_3rd_kfs_result
+    completed = bool(second_place_3rd_kfs_result.get("completed", False))
+    return {
+        "completed": completed,
+        "failed_step": None if completed else "second_place_3rd_kfs",
+        "suck_count_after": int(kfs.suck_count),
+        **results,
+    }
+
+
+def totally_win(
+    sender,
+    position_runtime,
+    odom_runtime,
+):
+    """
+    全胜组合流程。
+
+    固定执行顺序：
+      1. move.move_to_2rd_place(...)
+      2. kfs.release_kfs(...)
+      3. move.climb_R1_movement(...)
+      4. climb_R1(...)
+      5. kfs.sucker_release_pose(...)
+      6. kfs.place_3rd_kfs(...)
+
+    函数不接收额外业务输入，红蓝半场由各子流程根据 position_backend 自动判断。
+    任一步失败后立即返回，不继续执行后续硬件动作。
+    """
+    field_name = "blue" if position_backend.is_blue_field() else "red"
+    results = {
+        "field_name": field_name,
+        "suck_count_before": int(kfs.suck_count),
+    }
+
+    if int(kfs.suck_count) != 3:
+        return {
+            "completed": False,
+            "failed_step": "invalid_suck_count_before_totally_win",
+            "required_suck_count": 3,
+            **results,
+        }
+
+    move_to_column2_result = move_lib.move_to_2rd_place(
+        sender=sender,
+        position_runtime=position_runtime,
+        odom_runtime=odom_runtime,
+    )
+    results["move_to_column2_result"] = move_to_column2_result
+    if not move_to_column2_result.get("completed", False):
+        return {
+            "completed": False,
+            "failed_step": "move_to_column2",
+            **results,
+        }
+
+    release_kfs_result = kfs.release_kfs(sender)
+    results["release_kfs_result"] = release_kfs_result
+    if not release_kfs_result.get("completed", False):
+        return {
+            "completed": False,
+            "failed_step": "release_kfs",
+            "suck_count_after": int(kfs.suck_count),
+            **results,
+        }
+
+    climb_r1_movement_result = move_lib.climb_R1_movement(
+        sender=sender,
+        position_runtime=position_runtime,
+        odom_runtime=odom_runtime,
+    )
+    results["climb_r1_movement_result"] = climb_r1_movement_result
+    if not climb_r1_movement_result.get("completed", False):
+        return {
+            "completed": False,
+            "failed_step": "climb_R1_movement",
+            "suck_count_after": int(kfs.suck_count),
+            **results,
+        }
+
+    climb_r1_result = climb_R1(
+        sender=sender,
+        position_runtime=position_runtime,
+        odom_runtime=odom_runtime,
+    )
+    results["climb_r1_result"] = climb_r1_result
+    if not climb_r1_result.get("completed", False):
+        return {
+            "completed": False,
+            "failed_step": "climb_R1",
+            "suck_count_after": int(kfs.suck_count),
+            **results,
+        }
+
+    sucker_release_pose_result = kfs.sucker_release_pose(sender)
+    results["sucker_release_pose_result"] = sucker_release_pose_result
+    if not sucker_release_pose_result.get("completed", False):
+        return {
+            "completed": False,
+            "failed_step": "sucker_release_pose",
+            "suck_count_after": int(kfs.suck_count),
+            **results,
+        }
+
+    place_3rd_kfs_result = kfs.place_3rd_kfs(
+        sender=sender,
+        position_runtime=position_runtime,
+    )
+    results["place_3rd_kfs_result"] = place_3rd_kfs_result
+    completed = bool(place_3rd_kfs_result.get("completed", False))
+    return {
+        "completed": completed,
+        "failed_step": None if completed else "place_3rd_kfs",
+        "suck_count_after": int(kfs.suck_count),
+        **results,
     }
 
 
@@ -1397,13 +1803,14 @@ def descend(
     loop_interval_sec=0.02,
     move_speed=600,
     timeout_sec=None,
+    return_to_center=True,
 ):
     """
     组合式下楼梯动作：
     1. direction1 取反方向并转换为下楼前对正角。
     2. 阻塞旋转到该反方向角。
     3. 调用 move.descend(...) 执行底层阻塞式下楼梯控制。
-    4. 调用 move_backward_to_des(...) 倒退移动到 (des_x, des_y)，最终朝向 direction2 对应角度。
+    4. return_to_center=True 时调用 move_backward_to_des(...) 倒退移动到 (des_x, des_y)，最终朝向 direction2 对应角度。
     5. 如果传入 timeout_sec，则总流程超时后打印“下楼梯错误”并终止程序。
     """
     started_at = time.time()
@@ -1453,20 +1860,23 @@ def descend(
         print("下楼梯错误")
         sys.exit(1)
 
-    move_timeout_sec = None if deadline is None else max(0.0, deadline - time.time())
-    move_result = move_backward_to_des(
-        sender=sender,
-        position_runtime=position_runtime,
-        odom_runtime=odom_runtime,
-        x=des_x,
-        y=des_y,
-        target_deg=des_deg2,
-        v=STAIR_MOVE_MAX_CMD,
-        total_timeout_sec=move_timeout_sec,
-    )
-    if move_result is None:
-        print("下楼梯错误")
-        sys.exit(1)
+    return_to_center = bool(return_to_center)
+    move_result = None
+    if return_to_center:
+        move_timeout_sec = None if deadline is None else max(0.0, deadline - time.time())
+        move_result = move_backward_to_des(
+            sender=sender,
+            position_runtime=position_runtime,
+            odom_runtime=odom_runtime,
+            x=des_x,
+            y=des_y,
+            target_deg=des_deg2,
+            v=STAIR_MOVE_MAX_CMD,
+            total_timeout_sec=move_timeout_sec,
+        )
+        if move_result is None:
+            print("下楼梯错误")
+            sys.exit(1)
 
     if deadline is not None and time.time() >= deadline:
         print("下楼梯错误")
@@ -1490,6 +1900,7 @@ def descend(
         "descend_result": descend_result,
         "height_result": descend_result,
         "move_result": move_result,
+        "return_to_center": bool(return_to_center),
         "timeout_sec": None if timeout_sec is None else float(timeout_sec),
         "elapsed_sec": float(time.time() - started_at),
         "completed": True,
@@ -1507,6 +1918,8 @@ def execute_stair_transition(
     height_relation,
     task_direction,
     final_direction,
+    return_to_center=True,
+    return_center_skip_reason=None,
 ):
     """
     根据 from/to 高低关系执行一次上下楼梯动作。
@@ -1516,6 +1929,7 @@ def execute_stair_transition(
       2: to 比 from 低，调用 descend(...)
 
     task_direction 是本次上下楼方向，final_direction 是动作完成后的最终朝向。
+    return_to_center=False 时只执行上下楼，不执行最后到 to_pos 中心的移动。
     """
     height_relation = int(height_relation)
     task_direction = int(task_direction)
@@ -1549,6 +1963,7 @@ def execute_stair_transition(
             direction2=final_direction,
             x=to_x,
             y=to_y,
+            return_to_center=return_to_center,
         )
         return {
             "height_relation": int(height_relation),
@@ -1559,12 +1974,14 @@ def execute_stair_transition(
             "to_x": float(to_x),
             "to_y": float(to_y),
             "stair_action": "climb",
+            "return_to_center": bool(return_to_center),
+            "return_center_skip_reason": return_center_skip_reason,
             "stair_result": stair_result,
             "completed": bool(stair_result.get("completed", False)),
             "failed_step": (
                 None
                 if stair_result.get("completed", False)
-                else "climb"
+                else stair_result.get("failed_step", "climb")
             ),
         }
 
@@ -1578,6 +1995,7 @@ def execute_stair_transition(
         current_y=from_y,
         des_x=to_x,
         des_y=to_y,
+        return_to_center=return_to_center,
     )
     return {
         "height_relation": int(height_relation),
@@ -1588,12 +2006,14 @@ def execute_stair_transition(
         "to_x": float(to_x),
         "to_y": float(to_y),
         "stair_action": "descend",
+        "return_to_center": bool(return_to_center),
+        "return_center_skip_reason": return_center_skip_reason,
         "stair_result": stair_result,
         "completed": bool(stair_result.get("completed", False)),
         "failed_step": (
             None
             if stair_result.get("completed", False)
-            else "descend"
+            else stair_result.get("failed_step", "descend")
         ),
     }
 
@@ -1726,6 +2146,7 @@ def execute_action_row(
             "side_suck_result": side_suck_result,
             "completed": bool(side_suck_result.get("completed", False)),
             "implemented": bool(side_suck_result.get("implemented", True)),
+            "failed_step": side_suck_result.get("failed_step"),
         }
 
     final_direction = _action_value_to_int(final_direction, "final_direction")
@@ -1886,6 +2307,36 @@ def execute_action_row(
             return result
 
         if height_action != 0:
+            return_to_center = True
+            return_center_skip_reason = None
+            next_stair_inferred_direction = tools.stair_id_to_direction(
+                next_from_pose,
+                next_to_pose,
+                exit_on_error=False,
+            )
+            next_stair_height_relation = 0
+            if next_stair_inferred_direction in (1, 2, 3, 4):
+                next_stair_height_relation = get_stair_height_relation(
+                    next_from_pose,
+                    next_stair_inferred_direction,
+                )
+
+                if (
+                    height_relation == 1
+                    and next_stair_inferred_direction == move_dir
+                    and next_stair_height_relation == height_relation
+                ):
+                    return_to_center = False
+                    return_center_skip_reason = "next_same_direction_higher_stair"
+                elif (
+                    height_relation == 2
+                    and next_height_action == 1
+                    and next_stair_inferred_direction == move_dir
+                    and next_stair_height_relation == height_relation
+                ):
+                    return_to_center = False
+                    return_center_skip_reason = "next_same_direction_descend"
+
             stair_transition_result = execute_stair_transition(
                 sender=sender,
                 position_runtime=position_runtime,
@@ -1897,8 +2348,14 @@ def execute_action_row(
                 height_relation=height_relation,
                 task_direction=move_dir,
                 final_direction=final_direction,
+                return_to_center=return_to_center,
+                return_center_skip_reason=return_center_skip_reason,
             )
             result["branch"] = "directional"
+            result["next_stair_inferred_direction"] = int(next_stair_inferred_direction)
+            result["next_stair_height_relation"] = int(next_stair_height_relation)
+            result["return_to_center"] = bool(return_to_center)
+            result["return_center_skip_reason"] = return_center_skip_reason
             result["stair_transition_result"] = stair_transition_result
             result["completed"] = bool(
                 stair_transition_result.get("completed", False)
@@ -1927,7 +2384,7 @@ def execute_action_matrix(
     position_runtime,
     odom_runtime,
     action_matrix,
-    final_direction=1,
+    final_direction=None,
     stop_on_unimplemented=True,
     stop_on_failed=True,
 ):
@@ -1936,9 +2393,12 @@ def execute_action_matrix(
 
     action_matrix: n*5，每行格式同 execute_action_row()。
     final_direction: 没有下一行有效移动时使用的默认最终朝向。
+      None 时使用当前半场下 180deg 对应方向码：红场 2，蓝场 3。
     stop_on_unimplemented: 遇到 execute_action_row() 返回 implemented=False 时是否终止。
     stop_on_failed: 遇到已实现但 completed=False 的动作行时是否终止。
     """
+    if final_direction is None:
+        final_direction = 3 if position_backend.is_blue_field() else 2
     final_direction = _action_value_to_int(final_direction, "final_direction")
     if final_direction not in (1, 2, 3, 4):
         print(

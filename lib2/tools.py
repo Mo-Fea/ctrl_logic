@@ -344,17 +344,49 @@ def yaw_deg_to_i16(yaw_deg):
 
 
 def direction_int_to_yaw_deg(direction):
-    if int(direction) not in (1, 2, 3, 4):
+    direction = int(direction)
+    if direction not in (1, 2, 3, 4):
         print(f"{direction_int_to_yaw_deg.__name__}输入错误")
         sys.exit(1)
 
+    # 方向编号表达任务/场地语义；红蓝半场的 map x 轴物理方向相反，
+    # 因此 x 轴相关的 2/3 方向需要按半场交换 yaw。
+    from lib2 import position_backend
+
+    if position_backend.is_blue_field():
+        direction_to_yaw = {
+            1: 90.00,
+            2: 0.01,
+            3: 180.00,
+            4: -90.00,
+        }
+    else:
+        direction_to_yaw = {
+            1: 90.00,
+            2: 180.00,
+            3: 0.01,
+            4: -90.00,
+        }
+
+    return round(float(direction_to_yaw[direction]), 2)
+
+
+def map_direction_int_to_yaw_deg(direction):
+    """
+    按当前 map 坐标轴直接换算方向 yaw，不做红蓝半场物理方向修正。
+    """
+    direction = int(direction)
+    if direction not in (1, 2, 3, 4):
+        print(f"{map_direction_int_to_yaw_deg.__name__}输入错误")
+        sys.exit(1)
+
     direction_to_yaw = {
-        1: 0.01,
-        2: 90.00,
-        3: -90.00,
-        4: 180.00,
+        1: 90.00,
+        2: 180.00,
+        3: 0.01,
+        4: -90.00,
     }
-    return round(float(direction_to_yaw[int(direction)]), 2)
+    return round(float(direction_to_yaw[direction]), 2)
 
 
 def stair_id_to_direction(from_id, to_id, stair_matrix=None, exit_on_error=True):
@@ -363,10 +395,19 @@ def stair_id_to_direction(from_id, to_id, stair_matrix=None, exit_on_error=True)
 
     返回值沿用动作矩阵方向编码:
       0: 不相邻
-      1: 前方 / 0.01度方向
-      2: +90度方向 / 左
-      3: -90度方向 / 右
-      4: 后方 / 180度方向
+      1/2/3/4: 当前红蓝场语义下的四方向编号。
+
+    当前实测方向语义:
+      红场:
+        dx > 0 -> direction 3  # 0.01deg, x+
+        dx < 0 -> direction 2  # 180deg, x-
+        dy > 0 -> direction 1  # 90deg, y+
+        dy < 0 -> direction 4  # -90deg, y-
+      蓝场:
+        dx > 0 -> direction 2  # 0.01deg, x+
+        dx < 0 -> direction 3  # 180deg, x-
+        dy > 0 -> direction 4  # -90deg, y+
+        dy < 0 -> direction 1  # 90deg, y-
 
     默认读取 position_resource.get_stair_matrix()，并使用矩阵中的真实 x/y 坐标判断，
     不依赖编号是否连续，因此 3 和 4 这种跨行编号不会被误判为左右相邻。
@@ -397,10 +438,18 @@ def stair_id_to_direction(from_id, to_id, stair_matrix=None, exit_on_error=True)
         major_axis_max = side_length * 1.25
         minor_axis_max = side_length * 0.2
 
+        from lib2 import position_backend
+
         if major_axis_min <= abs_dx <= major_axis_max and abs_dy <= minor_axis_max:
-            direction = 1 if dx > 0.0 else 4
+            if position_backend.is_blue_field():
+                direction = 2 if dx > 0.0 else 3
+            else:
+                direction = 3 if dx > 0.0 else 2
         elif major_axis_min <= abs_dy <= major_axis_max and abs_dx <= minor_axis_max:
-            direction = 2 if dy > 0.0 else 3
+            if position_backend.is_blue_field():
+                direction = 4 if dy > 0.0 else 1
+            else:
+                direction = 1 if dy > 0.0 else 4
 
     if direction == 0 and exit_on_error:
         print(f"{stair_id_to_direction.__name__}输入错误: {from_id} 与 {to_id} 不相邻")

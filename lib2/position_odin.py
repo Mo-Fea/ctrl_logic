@@ -11,35 +11,56 @@ import math
 from lib2 import position_backend
 
 
-ENTRANCE_X_RED = 0.587
-ENTRANCE_Y_RED = -1.725
-PRE_ENTRANCE_X_RED = -0.500
-PRE_ENTRANCE_Y_RED = -1.776
+ENTRANCE_X_RED = 1.730
+ENTRANCE_Y_RED = 0.511
+PRE_ENTRANCE_X_RED = 0.500
+PRE_ENTRANCE_Y_RED = 1.776
 WEAPON_TARGETS_RED = {
-    1: (-2.176, 1.120),
-    2: (-1.998, 1.122),
-    3: (-1.784, 1.116),
-    4: (-1.588, 1.110),
-    5: (-1.378, 1.113),
-    6: (-1.723, 1.150),
+    1: (-1.148, -2.184),
+    2: (-1.140, -1.995),
+    3: (-1.140, -1.179),
+    4: (-1.135, -1.595),
+    5: (-1.143, -1.400),
+    6: (1.723, -1.150),
 }
-WEAPON_RETREAT_STOP_Y_RED = 4.00
+WEAPON_RETREAT_STOP_Y_RED = -4.00
+
+# 九宫格区域坐标占位（二维坐标，待实测后替换）
+pre_entrance9_red = (0.0, 0.0)
+entrance9_red = (0.0, 0.0)
+column1_red = (0.0, 0.0)
+column2_red = (0.0, 0.0)
+column3_red = (0.0, 0.0)
+pre_climb_R2_red = (0.0, 0.0)
+climb_R2_red = (0.0, 0.0)
+pre_R1climb_red = (0.0, 0.0)
+R1climb_red = (0.0, 0.0)
 
 
 # Left field placeholders. Fill these with measured coordinates from the real field.
-ENTRANCE_X_BLUE = 0.55
-ENTRANCE_Y_BLUE = 1.55
-PRE_ENTRANCE_X_BLUE = -0.500
-PRE_ENTRANCE_Y_BLUE = 1.776
+ENTRANCE_X_BLUE = -0.55
+ENTRANCE_Y_BLUE = -1.55
+PRE_ENTRANCE_X_BLUE = 0.500
+PRE_ENTRANCE_Y_BLUE = -1.776
 WEAPON_TARGETS_BLUE = {
-    1: (-1.840, -1.312),
-    2: (-1.902, -1.342),
-    3: (-2.265, -1.33),
-    4: (-2.191, -1.150),
-    5: (-1.996, -1.150),
-    6: (-1.793, -1.150),
+    1: (1.840, 1.312),
+    2: (1.902, 1.342),
+    3: (2.265, 1.33),
+    4: (2.191, 1.150),
+    5: (1.996, 1.150),
+    6: (1.793, 1.150),
 }
-WEAPON_RETREAT_STOP_Y_BLUE = -4.00
+WEAPON_RETREAT_STOP_Y_BLUE = 4.00
+
+pre_entrance9_blue = (0.0, 0.0)
+entrance9_blue = (0.0, 0.0)
+column1_blue = (0.0, 0.0)
+column2_blue = (0.0, 0.0)
+column3_blue = (0.0, 0.0)
+pre_climb_R2_blue = (0.0, 0.0)
+climb_R2_blue = (0.0, 0.0)
+pre_R1climb_blue = (0.0, 0.0)
+R1climb_blue = (0.0, 0.0)
 
 
 # Backward-compatible defaults: current main flow still uses red/right field.
@@ -80,8 +101,8 @@ def get_weapon_targets():
 def get_weapon_retreat_stop_y():
     return float(_select_field_value(WEAPON_RETREAT_STOP_Y_RED, WEAPON_RETREAT_STOP_Y_BLUE))
 
-LIDAR_TO_BASE_X = - 0.236  # m
-LIDAR_TO_BASE_Y = - 0.206  # m  
+LIDAR_TO_BASE_X = - 0.399  # m
+LIDAR_TO_BASE_Y = - 0.246  # m
 LIDAR_TO_BASE_Z = 0.0
 T_LIDAR_TO_BASE = np.array([
     [1.0, 0.0, 0.0, LIDAR_TO_BASE_X],
@@ -91,8 +112,8 @@ T_LIDAR_TO_BASE = np.array([
 ], dtype=float)
 
 
-LIDAR_TO_WEAPON_X = -0.730  # m
-LIDAR_TO_WEAPON_Y = -0.206  # m
+LIDAR_TO_WEAPON_X = -0.742  # m
+LIDAR_TO_WEAPON_Y = -0.246  # m
 LIDAR_TO_WEAPON_Z = 0.0  # m
 T_LIDAR_TO_WEAPON = np.array([
     [1.0, 0.0, 0.0, LIDAR_TO_WEAPON_X],

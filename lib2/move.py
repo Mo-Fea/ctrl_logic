@@ -60,6 +60,9 @@ DEFAULT_MOVE_PID_INTEGRAL_LIMIT = 1.0
 # 底盘通道符号；ch0 符号已按实测翻转。
 DEFAULT_LATERAL_CMD_SIGN = -1
 DEFAULT_FORWARD_CMD_SIGN = 1
+# 侧吸定时平移默认参数，便于现场调试。
+DEFAULT_SIDE_SUCK_LATERAL_CMD_ABS = 200
+DEFAULT_SIDE_SUCK_LATERAL_DURATION_SEC = 2.0
 # 进入近点区后的前进通道值。
 DEFAULT_NEAR_FORWARD_CMD = 100
 # 近点区距离阈值，距离小于该值后使用 DEFAULT_NEAR_FORWARD_CMD，单位 m。
@@ -881,6 +884,503 @@ def set_motion_channels(
         des_yaw_i16=des_yaw_i16,
         channel_values=values,
     )
+
+
+def move_to_2rd_place(
+    sender,
+    position_runtime,
+    odom_runtime,
+    cruise_forward_cmd=DEFAULT_MOVE_FORWARD_CMD,
+    timeout_sec=None,
+    reference="robot",
+    **kwargs,
+):
+    """
+    移动到当前半场九宫格 column2 坐标。
+
+    坐标：
+      - 红半场读取 position 后端的 column2_red。
+      - 蓝半场读取 position 后端的 column2_blue。
+
+    目标方向：
+      - 红蓝半场都以 180deg 方向移动。
+      - 按当前四方向映射，红场 180deg 对应 direction=2；
+        蓝场 180deg 对应 direction=3。
+    """
+    current_position_lib = position_resource.get_position_lib()
+    if position_backend.is_blue_field():
+        coordinate_name = "column2_blue"
+        target_direction = 3
+    else:
+        coordinate_name = "column2_red"
+        target_direction = 2
+
+    if not hasattr(current_position_lib, coordinate_name):
+        raise AttributeError(
+            f"{current_position_lib.__name__} must define {coordinate_name}"
+        )
+
+    target_x, target_y = getattr(current_position_lib, coordinate_name)
+    target_yaw_deg = tools.direction_int_to_yaw_deg(target_direction)
+
+    move_result = move_to_target(
+        sender=sender,
+        position_runtime=position_runtime,
+        odom_runtime=odom_runtime,
+        target_x=target_x,
+        target_y=target_y,
+        final_target_yaw_deg=target_yaw_deg,
+        cruise_forward_cmd=cruise_forward_cmd,
+        timeout_sec=timeout_sec,
+        reference=reference,
+        **kwargs,
+    )
+
+    return {
+        "completed": move_result is not None
+        and not bool(move_result.get("timed_out", False)),
+        "failed_step": (
+            None
+            if move_result is not None and not bool(move_result.get("timed_out", False))
+            else "move_to_2rd_place"
+        ),
+        "coordinate_name": coordinate_name,
+        "target_x": float(target_x),
+        "target_y": float(target_y),
+        "target_direction": int(target_direction),
+        "target_yaw_deg": float(target_yaw_deg),
+        "move_result": move_result,
+    }
+
+
+def enter_battlefield(
+    sender,
+    position_runtime,
+    odom_runtime,
+    cruise_forward_cmd=DEFAULT_MOVE_FORWARD_CMD,
+    timeout_sec=None,
+    reference="robot",
+    **kwargs,
+):
+    """
+    进入九宫格/战场区域。
+
+    红蓝半场流程相同，均保持 180deg 航向依次移动：
+      1. pre_entrance9_<red/blue>
+      2. entrance9_<red/blue>
+
+    坐标按当前半场从 position 后端选择，航向按方向码转换：
+      - 红场 direction=2 -> 180deg
+      - 蓝场 direction=3 -> 180deg
+    """
+    current_position_lib = position_resource.get_position_lib()
+    if position_backend.is_blue_field():
+        pre_coordinate_name = "pre_entrance9_blue"
+        entrance_coordinate_name = "entrance9_blue"
+        field_name = "blue"
+        target_direction = 3
+    else:
+        pre_coordinate_name = "pre_entrance9_red"
+        entrance_coordinate_name = "entrance9_red"
+        field_name = "red"
+        target_direction = 2
+
+    for coordinate_name in (pre_coordinate_name, entrance_coordinate_name):
+        if not hasattr(current_position_lib, coordinate_name):
+            raise AttributeError(
+                f"{current_position_lib.__name__} must define {coordinate_name}"
+            )
+
+    pre_target_x, pre_target_y = getattr(current_position_lib, pre_coordinate_name)
+    entrance_target_x, entrance_target_y = getattr(
+        current_position_lib,
+        entrance_coordinate_name,
+    )
+    target_yaw_deg = tools.direction_int_to_yaw_deg(target_direction)
+
+    pre_move_result = move_to_target(
+        sender=sender,
+        position_runtime=position_runtime,
+        odom_runtime=odom_runtime,
+        target_x=pre_target_x,
+        target_y=pre_target_y,
+        final_target_yaw_deg=target_yaw_deg,
+        cruise_forward_cmd=cruise_forward_cmd,
+        timeout_sec=timeout_sec,
+        reference=reference,
+        **kwargs,
+    )
+    pre_completed = pre_move_result is not None and not bool(
+        pre_move_result.get("timed_out", False)
+    )
+    if not pre_completed:
+        return {
+            "completed": False,
+            "failed_step": "move_to_pre_entrance9",
+            "field_name": field_name,
+            "target_direction": int(target_direction),
+            "target_yaw_deg": float(target_yaw_deg),
+            "pre_target": {
+                "coordinate_name": pre_coordinate_name,
+                "x": float(pre_target_x),
+                "y": float(pre_target_y),
+            },
+            "entrance_target": {
+                "coordinate_name": entrance_coordinate_name,
+                "x": float(entrance_target_x),
+                "y": float(entrance_target_y),
+            },
+            "pre_move_result": pre_move_result,
+            "entrance_move_result": None,
+        }
+
+    entrance_move_result = move_to_target(
+        sender=sender,
+        position_runtime=position_runtime,
+        odom_runtime=odom_runtime,
+        target_x=entrance_target_x,
+        target_y=entrance_target_y,
+        final_target_yaw_deg=target_yaw_deg,
+        cruise_forward_cmd=cruise_forward_cmd,
+        timeout_sec=timeout_sec,
+        reference=reference,
+        **kwargs,
+    )
+    entrance_completed = entrance_move_result is not None and not bool(
+        entrance_move_result.get("timed_out", False)
+    )
+
+    return {
+        "completed": bool(entrance_completed),
+        "failed_step": None if entrance_completed else "move_to_entrance9",
+        "field_name": field_name,
+        "target_direction": int(target_direction),
+        "target_yaw_deg": float(target_yaw_deg),
+        "pre_target": {
+            "coordinate_name": pre_coordinate_name,
+            "x": float(pre_target_x),
+            "y": float(pre_target_y),
+        },
+        "entrance_target": {
+            "coordinate_name": entrance_coordinate_name,
+            "x": float(entrance_target_x),
+            "y": float(entrance_target_y),
+        },
+        "pre_move_result": pre_move_result,
+        "entrance_move_result": entrance_move_result,
+    }
+
+
+def climb_R1_movement(
+    sender,
+    position_runtime,
+    odom_runtime,
+    cruise_forward_cmd=DEFAULT_MOVE_FORWARD_CMD,
+    timeout_sec=None,
+    reference="robot",
+    **kwargs,
+):
+    """
+    R1 上坡前移动动作。
+
+    红蓝半场都以 180deg 方向依次移动：
+      1. pre_climb_R2_<red/blue>
+      2. climb_R2_<red/blue>
+
+    180deg 不直接写死，按当前四方向映射转换：
+      - 红场 direction=2 -> 180deg
+      - 蓝场 direction=3 -> 180deg
+    """
+    current_position_lib = position_resource.get_position_lib()
+    if position_backend.is_blue_field():
+        pre_coordinate_name = "pre_climb_R2_blue"
+        climb_coordinate_name = "climb_R2_blue"
+        target_direction = 3
+    else:
+        pre_coordinate_name = "pre_climb_R2_red"
+        climb_coordinate_name = "climb_R2_red"
+        target_direction = 2
+
+    for coordinate_name in (pre_coordinate_name, climb_coordinate_name):
+        if not hasattr(current_position_lib, coordinate_name):
+            raise AttributeError(
+                f"{current_position_lib.__name__} must define {coordinate_name}"
+            )
+
+    pre_target_x, pre_target_y = getattr(current_position_lib, pre_coordinate_name)
+    climb_target_x, climb_target_y = getattr(current_position_lib, climb_coordinate_name)
+    target_yaw_deg = tools.direction_int_to_yaw_deg(target_direction)
+
+    pre_move_result = move_to_target(
+        sender=sender,
+        position_runtime=position_runtime,
+        odom_runtime=odom_runtime,
+        target_x=pre_target_x,
+        target_y=pre_target_y,
+        final_target_yaw_deg=target_yaw_deg,
+        cruise_forward_cmd=cruise_forward_cmd,
+        timeout_sec=timeout_sec,
+        reference=reference,
+        **kwargs,
+    )
+    pre_completed = pre_move_result is not None and not bool(
+        pre_move_result.get("timed_out", False)
+    )
+    if not pre_completed:
+        return {
+            "completed": False,
+            "failed_step": "move_to_pre_climb_R1",
+            "target_direction": int(target_direction),
+            "target_yaw_deg": float(target_yaw_deg),
+            "pre_target": {
+                "coordinate_name": pre_coordinate_name,
+                "x": float(pre_target_x),
+                "y": float(pre_target_y),
+            },
+            "climb_target": {
+                "coordinate_name": climb_coordinate_name,
+                "x": float(climb_target_x),
+                "y": float(climb_target_y),
+            },
+            "pre_move_result": pre_move_result,
+            "climb_move_result": None,
+        }
+
+    climb_move_result = move_to_target(
+        sender=sender,
+        position_runtime=position_runtime,
+        odom_runtime=odom_runtime,
+        target_x=climb_target_x,
+        target_y=climb_target_y,
+        final_target_yaw_deg=target_yaw_deg,
+        cruise_forward_cmd=cruise_forward_cmd,
+        timeout_sec=timeout_sec,
+        reference=reference,
+        **kwargs,
+    )
+    climb_completed = climb_move_result is not None and not bool(
+        climb_move_result.get("timed_out", False)
+    )
+
+    return {
+        "completed": bool(climb_completed),
+        "failed_step": None if climb_completed else "move_to_climb_R1",
+        "target_direction": int(target_direction),
+        "target_yaw_deg": float(target_yaw_deg),
+        "pre_target": {
+            "coordinate_name": pre_coordinate_name,
+            "x": float(pre_target_x),
+            "y": float(pre_target_y),
+        },
+        "climb_target": {
+            "coordinate_name": climb_coordinate_name,
+            "x": float(climb_target_x),
+            "y": float(climb_target_y),
+        },
+        "pre_move_result": pre_move_result,
+        "climb_move_result": climb_move_result,
+    }
+
+
+def side_suck_movement(
+    sender,
+    position_runtime,
+    odom_runtime,
+    target_stair_id,
+    lateral_distance=0.5,
+    cruise_forward_cmd=DEFAULT_MOVE_FORWARD_CMD,
+    adjust_forward_cmd=300,
+    adjust_duration_sec=1.0,
+    timeout_sec=None,
+    reference="robot",
+    **kwargs,
+):
+    """
+    侧吸移动动作。
+
+    target_stair_id:
+      只能为 1 或 3，表示目标台阶。
+
+    移动逻辑：
+      - 先读取当前半场编号 -1 台阶坐标。
+      - target_stair_id=1:
+          红场移动到 (x - 0.5, y)，蓝场移动到 (x + 0.5, y)。
+      - target_stair_id=3:
+          红场移动到 (x + 0.5, y)，蓝场移动到 (x - 0.5, y)。
+      - 红场目标角度为 90deg，蓝场目标角度为 -90deg。
+      - 到侧吸预备点后，以 ch2=300 前进 1s。
+
+    90/-90 不直接写死，按当前四方向映射转换：
+      - 红场 direction=1 -> 90deg
+      - 蓝场 direction=4 -> -90deg
+    """
+    target_stair_id = int(target_stair_id)
+    if target_stair_id not in (1, 3):
+        raise ValueError(
+            f"target_stair_id must be 1 or 3, got {target_stair_id}"
+        )
+
+    base_x, base_y = position_resource.get_stair_xy(-1)
+    lateral_distance = abs(float(lateral_distance))
+
+    is_blue_field = position_backend.is_blue_field()
+    if is_blue_field:
+        target_direction = 4
+        lateral_sign = 1 if target_stair_id == 1 else -1
+    else:
+        target_direction = 1
+        lateral_sign = -1 if target_stair_id == 1 else 1
+
+    target_x = float(base_x) + float(lateral_sign) * lateral_distance
+    target_y = float(base_y)
+    target_yaw_deg = tools.direction_int_to_yaw_deg(target_direction)
+
+    side_move_result = move_to_target(
+        sender=sender,
+        position_runtime=position_runtime,
+        odom_runtime=odom_runtime,
+        target_x=target_x,
+        target_y=target_y,
+        final_target_yaw_deg=target_yaw_deg,
+        cruise_forward_cmd=cruise_forward_cmd,
+        timeout_sec=timeout_sec,
+        reference=reference,
+        **kwargs,
+    )
+    side_move_completed = side_move_result is not None and not bool(
+        side_move_result.get("timed_out", False)
+    )
+    if not side_move_completed:
+        return {
+            "completed": False,
+            "failed_step": "move_to_side_suck_prepare",
+            "target_stair_id": int(target_stair_id),
+            "base_stair_id": -1,
+            "base_x": float(base_x),
+            "base_y": float(base_y),
+            "target_x": float(target_x),
+            "target_y": float(target_y),
+            "target_direction": int(target_direction),
+            "target_yaw_deg": float(target_yaw_deg),
+            "lateral_distance": float(lateral_distance),
+            "lateral_sign": int(lateral_sign),
+            "side_move_result": side_move_result,
+            "adjust_drive_result": None,
+        }
+
+    adjust_drive_result = drive_with_channels_for_duration(
+        sender=sender,
+        duration_sec=adjust_duration_sec,
+        forward_cmd=adjust_forward_cmd,
+        target_yaw_deg=target_yaw_deg,
+        brake_reverse_cmd=0,
+        brake_duration_sec=0.0,
+    )
+    adjust_completed = adjust_drive_result is not None and bool(
+        adjust_drive_result.get("completed", False)
+    )
+
+    return {
+        "completed": bool(adjust_completed),
+        "failed_step": None if adjust_completed else "side_suck_high_adjust",
+        "target_stair_id": int(target_stair_id),
+        "base_stair_id": -1,
+        "base_x": float(base_x),
+        "base_y": float(base_y),
+        "target_x": float(target_x),
+        "target_y": float(target_y),
+        "target_direction": int(target_direction),
+        "target_yaw_deg": float(target_yaw_deg),
+        "lateral_distance": float(lateral_distance),
+        "lateral_sign": int(lateral_sign),
+        "adjust_forward_cmd": int(adjust_forward_cmd),
+        "adjust_duration_sec": float(adjust_duration_sec),
+        "side_move_result": side_move_result,
+        "adjust_drive_result": adjust_drive_result,
+    }
+
+
+def side_suck_lateral_movement(
+    sender,
+    target_stair_id,
+    lateral_cmd_abs=DEFAULT_SIDE_SUCK_LATERAL_CMD_ABS,
+    duration_sec=DEFAULT_SIDE_SUCK_LATERAL_DURATION_SEC,
+    target_yaw_deg=None,
+):
+    """
+    侧吸定时左右平移。
+
+    target_stair_id:
+      只能为 1 或 3。
+      - 1: 向左平移。
+      - 3: 向右平移。
+
+    红蓝半场当前逻辑一致，不反向。
+    默认平移通道绝对值和时间由全局量控制：
+      - DEFAULT_SIDE_SUCK_LATERAL_CMD_ABS
+      - DEFAULT_SIDE_SUCK_LATERAL_DURATION_SEC
+
+    按当前底盘 ch0 符号约定：
+      - 左移: lateral_cmd = -abs(lateral_cmd_abs)
+      - 右移: lateral_cmd = +abs(lateral_cmd_abs)
+    """
+    target_stair_id = int(target_stair_id)
+    if target_stair_id not in (1, 3):
+        raise ValueError(
+            f"target_stair_id must be 1 or 3, got {target_stair_id}"
+        )
+
+    lateral_cmd_abs = abs(int(lateral_cmd_abs))
+    duration_sec = float(duration_sec)
+    if duration_sec < 0.0:
+        raise ValueError(f"duration_sec must be >= 0, got {duration_sec}")
+
+    lateral_cmd = -lateral_cmd_abs if target_stair_id == 1 else lateral_cmd_abs
+    movement_direction = "left" if target_stair_id == 1 else "right"
+
+    drive_result = drive_with_channels_for_duration(
+        sender=sender,
+        duration_sec=duration_sec,
+        lateral_cmd=lateral_cmd,
+        forward_cmd=0,
+        rotation_cmd=0,
+        target_yaw_deg=target_yaw_deg,
+        brake_reverse_cmd=0,
+        brake_duration_sec=0.0,
+    )
+    stop_channels = set_motion_channels(
+        sender,
+        lateral_cmd=0,
+        forward_cmd=0,
+        rotation_cmd=0,
+        des_yaw_i16=(
+            None
+            if target_yaw_deg is None
+            else encode_target_yaw_i16(normalize_yaw_deg(target_yaw_deg))
+        ),
+    )
+
+    return {
+        "completed": bool(
+            drive_result is not None and drive_result.get("completed", False)
+        ),
+        "failed_step": (
+            None
+            if drive_result is not None and drive_result.get("completed", False)
+            else "side_suck_lateral_movement"
+        ),
+        "target_stair_id": int(target_stair_id),
+        "movement_direction": movement_direction,
+        "is_blue_field": bool(position_backend.is_blue_field()),
+        "lateral_cmd_abs": int(lateral_cmd_abs),
+        "lateral_cmd": int(lateral_cmd),
+        "duration_sec": float(duration_sec),
+        "target_yaw_deg": (
+            None if target_yaw_deg is None else float(normalize_yaw_deg(target_yaw_deg))
+        ),
+        "drive_result": drive_result,
+        "stop_channels": stop_channels,
+    }
 
 
 def move_to_target(

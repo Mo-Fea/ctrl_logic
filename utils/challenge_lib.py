@@ -12,7 +12,7 @@ try:
         detect_qr_data,
         get_color_frame,
         is_valid_qr_payload,
-        open_d435i,
+        open_image_source,
     )
 except ImportError:
     import race
@@ -21,7 +21,7 @@ except ImportError:
         detect_qr_data,
         get_color_frame,
         is_valid_qr_payload,
-        open_d435i,
+        open_image_source,
     )
 
 try:
@@ -38,20 +38,12 @@ ACTION_MATRIX_COLUMNS = [
     "grab_action",
 ]
 
-MOVE_DIR_CODES = {
-    (0, 0): 0,
-    (1, 0): 1,
-    (0, 1): 2,
-    (0, -1): 3,
-    (-1, 0): 4,
-}
-
 MOVE_DIR_NAMES = {
     0: "原地",
-    1: "前方",
-    2: "+90度/左",
-    3: "-90度/右",
-    4: "后方",
+    1: "方向1(红+Y/蓝-Y)",
+    2: "方向2(红-X/蓝+X)",
+    3: "方向3(红+X/蓝-X)",
+    4: "方向4(红-Y/蓝+Y)",
 }
 
 GRAB_ACTION_NAMES = {
@@ -59,11 +51,12 @@ GRAB_ACTION_NAMES = {
     1: "抓取",
 }
 
-EXIT_ACTION_ROWS = {
-    10: [10, 13, 1, 1, 0],
-    12: [12, 15, 1, 1, 0],
+EXIT_ACTION_TARGETS = {
+    10: 13,
+    12: 15,
 }
-ENTRY_ACTION_ROW = [-1, 2, 1, 1, 0]
+ENTRY_FROM_POS = -1
+ENTRY_TO_POS = 2
 
 SCANNER_RUNNING_LOCK = threading.Lock()
 PLANNING_CONFIG_LOCK = threading.Lock()
@@ -95,16 +88,20 @@ def qr_to_kfs(qr_string):
 
 
 def _direction_code(from_pos, to_pos):
-    """根据 race.py 的 lib2 坐标语义，计算网格移动方向编码。"""
+    """按执行层当前红/蓝半场语义计算方向码。"""
     if from_pos == to_pos:
         return 0
 
-    from_x, from_y, _ = race.pos_to_coord[int(from_pos)]
-    to_x, to_y, _ = race.pos_to_coord[int(to_pos)]
-    delta = (to_x - from_x, to_y - from_y)
-    if delta not in MOVE_DIR_CODES:
+    from lib2 import tools
+
+    direction = tools.stair_id_to_direction(
+        int(from_pos),
+        int(to_pos),
+        exit_on_error=False,
+    )
+    if direction == 0:
         raise ValueError(f"位置 {from_pos} 到 {to_pos} 不是相邻格，无法生成动作矩阵")
-    return MOVE_DIR_CODES[delta]
+    return int(direction)
 
 
 def _height_action(from_pos, to_pos):
@@ -117,14 +114,30 @@ def _height_action(from_pos, to_pos):
     return 1 if (to_height - from_height) != 0 else 0
 
 
+def _entry_action_row():
+    return [
+        ENTRY_FROM_POS,
+        ENTRY_TO_POS,
+        _direction_code(ENTRY_FROM_POS, ENTRY_TO_POS),
+        1,
+        0,
+    ]
+
+
 def _append_exit_action(rows):
     if not rows:
         return rows
 
     last_to_pos = int(rows[-1][1])
-    exit_row = EXIT_ACTION_ROWS.get(last_to_pos)
-    if exit_row is not None:
-        rows.append(exit_row.copy())
+    exit_to_pos = EXIT_ACTION_TARGETS.get(last_to_pos)
+    if exit_to_pos is not None:
+        rows.append([
+            last_to_pos,
+            exit_to_pos,
+            _direction_code(last_to_pos, exit_to_pos),
+            1,
+            0,
+        ])
     return rows
 
 
@@ -263,7 +276,7 @@ def build_action_matrix_with_pre_entry_pickup(qr_string):
     if pre_entry_r2_count == 0:
         action_matrix, path, effective_kfs = build_action_matrix_from_qr(data)
         action_matrix = np.vstack((
-            np.array([ENTRY_ACTION_ROW], dtype=int),
+            np.array([_entry_action_row()], dtype=int),
             action_matrix,
         ))
         return action_matrix, path, effective_kfs
@@ -331,10 +344,16 @@ def build_action_matrix_with_pre_entry_pickup(qr_string):
                 key=lambda result: result["movement_cost"],
             )
             pickup_position = selected["pickup_position"]
+            # -1->1/-1->3 是执行层约定的侧吸特殊行，不是普通相邻台阶。
+            pickup_direction = (
+                1
+                if pickup_position in (1, 3)
+                else _direction_code(ENTRY_FROM_POS, pickup_position)
+            )
             pre_entry_rows = np.array(
                 [
-                    [-1, pickup_position, 1, 0, 1],
-                    ENTRY_ACTION_ROW,
+                    [ENTRY_FROM_POS, pickup_position, pickup_direction, 0, 1],
+                    _entry_action_row(),
                 ],
                 dtype=int,
             )
@@ -405,6 +424,7 @@ class ChallengeQRScanner:
         stop_after_success=True,
         loop_interval_sec=0.01,
         open_camera_kwargs=None,
+        image_source=1,
         put_action_matrix_only=False,
         running_lock=None,
     ):
@@ -415,6 +435,7 @@ class ChallengeQRScanner:
         self.stop_after_success = bool(stop_after_success)
         self.loop_interval_sec = float(loop_interval_sec)
         self.open_camera_kwargs = {} if open_camera_kwargs is None else dict(open_camera_kwargs)
+        self.image_source = int(image_source)
         self.put_action_matrix_only = bool(put_action_matrix_only)
         self.running_lock = running_lock if running_lock is not None else SCANNER_RUNNING_LOCK
 
@@ -471,7 +492,10 @@ class ChallengeQRScanner:
         try:
             self.running_lock.acquire()
             lock_acquired = True
-            pipeline = open_d435i(**self.open_camera_kwargs)
+            pipeline = open_image_source(
+                image_source=self.image_source,
+                **self.open_camera_kwargs,
+            )
             detector = create_qr_detector()
 
             while not self.stop_event.is_set():
