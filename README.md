@@ -11,6 +11,7 @@
   -> utils/race.py 规划挑战赛路径
   -> utils/challenge_lib.py / utils/utils.py 生成 n*5 动作矩阵
   -> lib2/module.py 解释动作矩阵和组合动作
+  -> lib2/compete_logic.py 串联比赛区域流程
   -> lib2/move.py / lib2/kfs.py / lib2/weapon.py 执行底层移动、上下楼、KFS、weapon 通道时序
   -> lib2/tools.py 的 frame_thread 持续发送 V3 控制帧
 ```
@@ -21,20 +22,22 @@
 - 通信协议为 V3 控制帧，`tools.frame_thread` 内部维护 `ch0~ch9/yaw_i16/des_yaw_i16/cylinder_select`，动作层只局部更新自己负责的通道。
 - 后端选择拆成两层：`LIDAR_TYPE` 选择位姿来源，`FIELD_TYPE` 选择红/蓝半场坐标和地图方向。
 - 雷达后端：`1=odin`，`2=mid360`。主流程必须通过 `module.init(lidar_type=...)` 或 `module.configure_position_backend(...)` 刷新 `position_resource` 和 `move` 的缓存。
-- `module.init()` 建立 TCP 后会保持 `des_yaw_i16=0` 关闭航向 PID，不自动原地旋转；同时设置 `ch9=800`，依次执行 `weapon.weapon_down()` 和 `weapon.weapon_loose()`。完成后将 `ch1=0`、`ch5/ch6/ch7=1`，保持夹爪打开状态 `ch4=3` 和吸盘头角度 `ch9=800`。纯通信/位姿调试可传 `initialize_machine_pose=False` 跳过机械动作。
+- `module.init()` 建立 TCP 后会保持 `des_yaw_i16=0` 关闭航向 PID，不自动原地旋转；同时设置 `ch9=800`，依次执行 `weapon.weapon_up()` 和 `weapon.weapon_loose()`。完成后将 `ch1=0`、`ch5/ch6/ch7=1`，保持夹爪打开状态 `ch4=3` 和吸盘头角度 `ch9=800`。纯通信/位姿调试可传 `initialize_machine_pose=False` 跳过机械动作。
 - 场地半场：`1=red/right`，`2=blue/left`。蓝场入口、weapon、赛后三点里还有占位/镜像值，换场地前要重新核对实测坐标。
-- `lib2/` 执行层已按当前红/蓝半场方向语义处理方向码、台阶高低关系和梅林/侧吸相关坐标偏移。`utils/` 路径规划生成端仍按逻辑网格生成方向码，后续需要单独同步。
-- `race.py` 的比赛数量模式已集中化：`configure_competition_mode(1)` 使用 `2R1/2R2/1Fake`，模式 `2` 使用 `3R1/3R2/1Fake`；`REQUIRED_R2_PICKUP_COUNT` 独立表示 R2 必须抓取的数量，默认为 `2`。
+- `lib2/` 执行层和 `utils/challenge_lib.py` 生成端已按当前红/蓝半场方向语义处理方向码；`position_resource` 和 `utils/race.py` 均维护红/蓝半场台阶高度。
+- `utils/race.py` 的比赛数量模式已集中化：`configure_competition_mode(1)` 使用 `2R1/2R2/1Fake`，模式 `2` 使用 `3R1/3R2/1Fake`；`REQUIRED_R2_PICKUP_COUNT` 独立表示 R2 必须抓取的数量，默认为 `2`。
 - QR/KFS 规划前会按当前比赛模式严格校验 R1/R2/Fake 数量；只校验类型和数量，尚不校验摆放区域。
-- 完整挑战赛矩阵当前仍会自动包含固定入口/出口行：入口 `[-1,2,1,1,0]`，最后到 `10` 追加 `[10,13,1,1,0]`，最后到 `12` 追加 `[12,15,1,1,0]`。注意：这些固定行属于路径规划生成端，尚未同步到当前红/蓝方向语义。
-- 如 QR 前三位含 R2-KFS，`challenge_lib.build_action_matrix_with_pre_entry_pickup()` 会先生成场外吸取行，再插入入口上楼行。2号优先；1/3号同时存在时分别规划并选移动代价较小者。
+- 完整挑战赛矩阵当前仍会自动包含固定入口/出口行：入口为 `-1->2`，最后到 `10` 追加 `10->13`，最后到 `12` 追加 `12->15`；`move_dir` 由 `tools.stair_id_to_direction()` 按当前红/蓝半场动态生成。
+- 如 QR 前三位含 R2-KFS，`challenge_lib.build_action_matrix_with_pre_entry_pickup()` 会先生成场外吸取行，再插入入口上楼行。2号优先；1/3号同时存在时分别规划并选总代价较小者。
 - `module.move_to_des()` / `module.move_backward_to_des()` 默认 `v=500`；主流程显式传入 `v=600` 或 `v=300` 的调用不受默认值影响。
 - 旋转到目标角当前只看角度稳定：旋转期间 `ch0/ch2/ch3=0`，不做位置保持。默认角度容忍值为 `3deg`，稳定时间为 `1s`。
 - KFS 姿态和后续线程已拆到 `lib2/kfs.py`；`module.fetch_and_store_kfs()` 保留旧名，当前实际负责前探、双头吸盘切换、抓取、吸取和异步回初态，不再执行 pose4。
-- `module.side_suck()` 已接入 `[-1,1,1,0,1]` / `[-1,3,1,0,1]` 特殊动作行，完成侧吸微调、气缸/角度选择、pose5、吸取、横移、异步收尾和回到 `-1`。
+- `module.side_suck()` 已接入 `[-1,1,1,0,1]` / `[-1,3,1,0,1]` 特殊动作行，完成侧吸微调、气缸/角度选择、pose5、吸取、横移、异步收尾和回到 `-1`。侧吸准备点移动默认速度已改为 `move_speed=350`。
+- `kfs.kfs_suck_preparation(sender,count)` 已加入，按 `count=0/1/2` 预先选择气缸并打开吸气；`count=1` 选择 PF2 并 `suck_count += 1`，`count=2` 选择双气缸并 `suck_count += 2`，`count=0` 不执行动作。
 - 四轮锁角已封装为 `move.lock_wheel()` / `move.unlock_wheel()`。现有协议未说明锁存行为，切换到 KFS/weapon 模式后不保证继续锁轮。
-- `module.fetch_weapon()` 按红/蓝半场自动选择接近方向、抓取方向和释放前旋转方向；函数返回时保持夹取/抬起状态，不负责释放。
-- QR + weapon 完整入口当前是 `communication_competition/complete_blue.py`；`complete_red.py` 当前只是红场固定矩阵测试，两者不再视为结构一致。
+- `module.fetch_weapon()` 按红/蓝半场自动选择接近方向、抓取方向和释放前旋转方向；函数返回时保持夹取/抬起状态，不负责释放。可用 `move_to_approach_point=0` 跳过先到 weapon 前方约 `1m` 的接近点。
+- `tools.py` 已加入雷达左上角打点的角度坐标修正：`deg0_correction()`、`deg90_correction()`、`neg90_correction()`、`deg180_correction()` 和分派入口 `deg_correction(target_deg,x,y)`；红/蓝半场各维护一张修正表，当前蓝场表暂与红场一致。
+- `lib2/compete_logic.py` 当前封装区域流程：`rigion_1()` 抓 weapon 并等待 QR 规划锁释放，`rigion_2()` 消费动作矩阵队列并执行完整矩阵，`rigion_2_retry_plan(r1_count,r2_count,required_r2_pickup_count,qr_string,...)` 用参数重规划并推入队列，`rigion_3()` 进入九宫格后执行 `high_score190` 或 `totally_win`。
 
 ## 文件结构
 
@@ -46,24 +49,25 @@
 - `lib2/move.py`：底层移动、倒退、旋转、四轮锁角/解锁、上下楼触发、定时通道输出、weapon 释放。旧 `control_kfs_pose()` 已删除，KFS 姿态统一使用 `lib2/kfs.py`。
 - `lib2/kfs.py`：KFS 吸盘旋转、气缸选择、单一姿态、双头吸盘抓取、放置/释放原语和吸取后异步线程封装；pose5 侧吸触发默认保持 `1.0s`。
 - `lib2/module.py`：组合动作和执行层入口，包括初始化、到点、普通/侧吸 KFS、weapon 抓取、上下楼/R1 上坡组合、动作矩阵解释。
-- `utils/race.py`：挑战赛规划核心，维护红/蓝 `pos_to_coord`、比赛数量模式、布局校验、0-1 BFS 路径规划和可视化。
+- `lib2/compete_logic.py`：比赛区域级编排入口，当前包括区域1抓 weapon/等待 QR、区域2执行动作矩阵/参数化重规划、区域3进入九宫格并选择最终策略。
+- `utils/race.py`：挑战赛规划核心，维护红/蓝 `pos_to_coord`、比赛数量模式、布局校验、Dijkstra 代价路径规划和可视化。
 - `utils/challenge_lib.py`：挑战赛对外入口，封装二维码解析、场外预吸取候选规划、入口/出口动作行、动作矩阵生成和后台 QR 扫描。
 - `utils/utils.py`：无 GUI 工具入口，可从 QR 或 KFS 字典生成动作矩阵；也保留对抗赛/旧梅林入口。
-- `utils/process.py`：二维码图像源、检测和 payload 校验。`image_source=1` 默认使用 D435i；`image_source=2` 以 `RELIABLE` QoS 订阅 `/odin1/image/undistorted`，并将常见 ROS `Image` 编码转换为 BGR。Odin 首帧超过 `5s` 未到达时会报错并释放扫码锁，避免主流程永久等待；驱动配置必须启用 `sendrgbundistort: 1`。
+- `utils/process.py`：二维码图像源、检测和 payload 校验。`image_source=1` 使用 RealSense D435i/D455 彩色流；打开时会打印设备名、序列号、固件和 USB 模式，默认先试 `640x480@30`，再 fallback 到 `848x480@30`、`1280x720@30`，预热阶段每帧 `5000ms` 超时并最多重试 `3` 次。D455 若枚举为 `USB=2.1`，`640x480@30` 可能首帧超时；应优先换到真正 USB3 链路。`image_source=2` 以 `RELIABLE` QoS 订阅 `/odin1/image/undistorted`，并将常见 ROS `Image` 编码转换为 BGR。Odin 首帧超过 `5s` 未到达时会报错并释放扫码锁，避免主流程永久等待；驱动配置必须启用 `sendrgbundistort: 1`。
 - `utils/route.py` / `utils/meilin.py`：旧梅林/对抗赛相关逻辑，非当前挑战赛主执行链路。
+- `d455.py`：独立 RealSense D455/D435i 二维码检测脚本，用后台线程模拟主流程扫码形态，默认 `640x480@30`、预热 `15` 帧、稳定 `5` 帧后输出结果，可用 `--no-window` 在 SSH 下关闭窗口。
 
 ## 主流程脚本
 
-- `communication_competition/complete_red.py`：当前是红场固定动作矩阵测试，不包含 QR、weapon 和赛后三段完整流程；它仍在矩阵外单独执行 `-1->2` 上楼，因为其固定 `ACTION_MATRIX` 未插入入口行。
-- `communication_competition/complete_blue.py`：蓝场 QR + weapon 完整流程。移动到 `-1` 后直接执行完整 QR 矩阵；入口上楼已在矩阵中，不再由脚本单独触发。蓝场坐标仍有镜像/占位性质。
-- `communication_competition/rigion_1.py`：红场 QR 区域流程，无 weapon 抓取；取得矩阵并移动到 `-1` 后直接执行包含入口/出口行的完整矩阵。
-- `communication_competition/rigion_2.py`：蓝场 QR 区域流程，结构与 `rigion_1.py` 接近；已去掉矩阵外的重复初始上楼。
-- `ultimate_test_script.py`：下位机完整交互调试入口。简单菜单 1~8 均已接入真实动作；复杂菜单已接入初始区域、梅林准备、上下楼、普通 KFS、侧吸、边缘微调、完整梅林和九宫格前三项测试；`九宫格完整测试` 和顶层 `完整流程测试` 仍未实现。
+- 当前工作区没有 `communication_competition/` 目录；新的比赛区域流程优先看 `lib2/compete_logic.py`。
+- 当前已在 `lib2/compete_logic.py` 内逐步封装比赛主线，根脚本 `competition_script.py` 仍需后续接入这些区域函数。
+- `ultimate_test_script.py`：下位机完整交互调试入口。顶层菜单已接入 `3.恢复至初态`；简单菜单 1~8 均已接入真实动作；复杂菜单已接入初始区域、梅林准备、上下楼、普通 KFS、侧吸、边缘微调、完整梅林和九宫格前三项测试；`九宫格完整测试` 和顶层 `完整流程测试` 仍未实现。
+- `ultimate_test_script.py` 的完整梅林测试不再检查 `current_stair_id=-1`；扫码拿到完整动作矩阵后，会先执行 `weapon.weapon_loose()` 打开 weapon 夹爪并等待 `5s`，再调用 `module.execute_action_matrix(...)`。
 - `catch.py` 仍保留旧 weapon `ch4=-100` 调试时序，不符合当前 `ch4=1/3` 边沿协议，未替换前不应连接实机运行。`move_t.py`、`ori_rot.py`、`descend.py` 等其他调试入口使用前也应先核对当前内容。
 
 ## 完全测试脚本
 
-`ultimate_test_script.py` 启动后先调用 `module.init(lidar_type=1)`。初始化期间关闭航向 PID，不自动旋转；设置 `ch9=800`，依次执行 weapon 夹爪放下和打开，然后进行红/蓝半场选择并启动 position/odom 资源。
+`ultimate_test_script.py` 启动后先调用 `module.init(lidar_type=1)`。初始化期间关闭航向 PID，不自动旋转；设置 `ch9=800`，依次执行 weapon 夹爪拉起和打开，然后进行红/蓝半场选择并启动 position/odom 资源。
 
 简单动作菜单：
 
@@ -72,11 +76,17 @@
 2. 旋转测试：目标角、分段阈值、完成阈值
 3. 吸盘头旋转测试：方向码 1/2/3/4
 4. 吸盘吸取状态测试：气缸 0/1/2，吸取/释放
-5. 机械臂姿态测试：pose0~5
+5. 机械臂姿态测试：pose0~6
 6. weapon 夹爪开合测试：开启使用 ch4:1->3，闭合使用 ch4:3->1
 7. weapon 夹爪拉起/放下测试
 8. 锁轮测试：调用 move.lock_wheel() / move.unlock_wheel()
 ```
+
+顶层菜单：
+
+- `1.简单动作测试`
+- `2.复杂动作测试`
+- `3.恢复至初态`：进入后询问“确认恢复（0返回，1确认）”。确认后依次执行 `move.unlock_wheel()`、`weapon.weapon_loose()`、`weapon.weapon_down()`，再将 `kfs.suck_count=1`、吸盘转到 `0deg`、选择双气缸 `cylinderSelect=0`、调用 `module.set_kfs_suction(suction_on=False, pose_id=0)` 关闭吸气，并将脚本内 `current_stair_id=0`。
 
 复杂动作菜单：
 
@@ -92,7 +102,7 @@
 - 方块吸取测试使用同样的询问逻辑，生成 `[from_pos,to_pos,move_dir,0,1]`；机器仍留在 `from_pos`，因此吸取后不把记录值改为目标台阶。
 - 侧吸测试只允许 `current_stair_id=-1`；输入目标 `1/3` 后生成 `[-1,to_pose,1,0,1]` 并通过 `execute_action_row()` 执行。侧吸流程最终回到 `-1`，因此记录值不变。
 - 边缘微调测试要求 `current_stair_id` 是有效台阶，输入方向 `1/2/3/4` 和 `0.00~0.50m` 微调距离后调用 `module.adjust_position(move_type=1,height_relation=2)`。
-- 完整梅林测试要求 `current_stair_id=-1`，先配置比赛模式 `1/2`，再启动后台 QR 扫描并执行返回的完整动作矩阵；执行成功后将记录值更新为矩阵最后一行的目标台阶。
+- 完整梅林测试不再拦截 `current_stair_id != -1`；进入后先配置比赛模式 `1/2`，再启动后台 QR 扫描。识别并规划出完整动作矩阵后，先打开 weapon 夹爪并等待 `5s`，随后执行返回的完整动作矩阵；执行成功后将记录值更新为矩阵最后一行的目标台阶。
 - 九宫格放置/释放流程依赖 `kfs.suck_count` 判断当前是否持有 KFS；二层箱子测试使用 pose4、释放前吸盘角度、固定坐标移动和 `kfs.release_kfs()`；三层释放测试使用 pose4、释放前吸盘角度和 `kfs.place_3rd_kfs()` 的 Z 下降检测。
 - 上下楼和方块吸取都会验证台阶相邻性；不相邻时打印“台阶不相邻，请输入正确的逻辑编号”并重新输入。
 
@@ -105,7 +115,8 @@
 - KFS 姿态、KFS 吸盘释放、KFS 回 0、上楼、下楼的“模式设置 + 触发边沿”必须使用 `tools.AUTO_TRIGGER_LOCK`。锁只覆盖触发临界区，触发后的等待阶段不持锁。
 - KFS 机械臂姿态接口只修改 `ch5/ch6/ch7`，不再写入 `ch4`；吸取/释放流程独立维护 `ch4`，吸取后的发送状态应继续保持 `ch4=3`。
 - KFS 姿态统一调用 `lib2/kfs.py`；不要恢复已删除的 `move.control_kfs_pose()` 或让机械臂姿态方法重新修改 `ch4`。
-- 锁轮当前按持续状态处理：只在持续保持 `ch5=1,ch6=2,ch7=1` 时认为锁轮；协议未说明切换模式后是否锁存。
+- 锁轮使用升降模式 `ch5=1,ch6=2`，`ch7:1->3` 上升沿进入锁轮，`ch7:3->1` 下降沿离开锁轮；触发临界区必须使用 `tools.AUTO_TRIGGER_LOCK`。
+- 比赛区域流程中的规划队列统一存放动作矩阵 `action_matrix`，不要再向该队列混入完整 `ChallengePlanResult` 对象。
 - 发现规划语义、动作矩阵、真实场地假设之间矛盾时，先指出问题；硬件动作相关逻辑要保守，宁可报错退出，不要静默跳过危险动作。
 - 当前工作区可能有用户改动或未跟踪文件，不要回退无关内容。
 
@@ -321,6 +332,36 @@ y=2: 3:40  6:20  9:40  12:20
 
 `tools.stair_id_to_direction()` 和 `position_resource.get_stair_height_relation()` 均按上述红/蓝语义工作。`race.pos_to_coord` 仍保持逻辑前/左网格，不直接表示真实地图 x/y；路径规划生成端的方向码同步另行处理。
 
+## 坐标修正
+
+当前现场打点约定：梅林台阶坐标以雷达左上角作为参考点；0/90/180/-90deg 的角度修正来自“左上角对准同一物理点后旋转到对应角度时，定位读数多出来的偏移”。因此 `tools.py` 中保存的是抵消量，即测量偏移的反号：
+
+```python
+RED_LIDAR_CORRECTION_BY_YAW = {
+    0.01: (0.000, 0.000),
+    90.00: (-0.050, -0.067),
+    180.00: (0.025, -0.151),
+    -90.00: (0.104, -0.081),
+}
+```
+
+蓝场 `BLUE_LIDAR_CORRECTION_BY_YAW` 当前暂用同一组值，后续需要按蓝场实测值替换。业务入口使用：
+
+```python
+tools.deg_correction(target_deg, x, y)
+```
+
+修正角度必须是“移动到该坐标时车体/雷达实际保持的朝向”，不是到点后额外旋转到的展示角度。该修正只适用于坐标按 `0.01deg/0deg` 基准打点、但动作以其它朝向到点的场景；如果某个坐标本来就是按目标朝向实测的，不应再套对应角度修正。
+
+`module.execute_action_row()` 当前只在梅林动作行内集中修正坐标：
+
+- `grab_action=1` 的 KFS 吸取分支：`from/to` 坐标都按当前任务方向 `move_dir` 修正；`fetch_and_store_kfs()` 和吸取后回 `from_pos` 中心共用修正后的 `from_x/from_y`。
+- 上楼分支：按当前任务方向 `move_dir` 修正 `from/to` 坐标。
+- 下楼分支：按当前任务方向的反方向修正，映射为 `1<->4`、`2<->3`。
+- 返回结果同时保留 `raw_from_x/raw_from_y/raw_to_x/raw_to_y` 和修正后的 `from_x/from_y/to_x/to_y`，便于现场判断误差。
+
+九宫格/对抗区当前也在 `move.py` 的坐标出口处统一套 `180deg` 修正：`move_to_2rd_place()`、`enter_battlefield()`、`climb_R1_movement()` 读取 `position_odin.py` 的 red/blue 坐标后先调用 `tools.deg180_correction()`；`ultimate_test_script.py` 的二层箱子硬编码坐标也同样套 `180deg` 修正。注意：如果这些九宫格坐标本来就是机器面朝 `180deg` 时实测的，则该修正可能会造成二次偏移，应按现场打点来源决定是否保留。
+
 挑战赛 KFS 数量配置：
 
 ```python
@@ -329,9 +370,9 @@ race.configure_competition_mode(2)  # R1=3, R2=3, Fake=1
 race.REQUIRED_R2_PICKUP_COUNT = 2   # 必须拿取数，与场上R2总数独立
 ```
 
-`race.validate_kfs_layout(kfs)` 会校验格子编号、KFS 类型及当前模式数量。`race.plan_path()` 仍使用 0-1 BFS：移动一格代价为 `1`，原地夹取代价为 `0`，旋转尚未计入代价。
+`race.validate_kfs_layout(kfs)` 会校验格子编号、KFS 类型及当前模式数量。`race.plan_path()` 当前使用带代价的 Dijkstra：基础移动代价为 `1`，吸取基础代价为 `0`，转向代价默认为 `1`，移动到带 R1 的格子额外 `+0.5`；这些代价由 `PATH_*` 全局参数和 `configure_path_costs(...)` 调整。
 
-场外预吸取规划只在 QR 前三位含 `2` 时触发：如第二位为 `2` 则硬优先选择2号；否则在1/3号候选中规划，两者同时存在时比较内部路径的移动格数，相同代价选1号。选中的格子在有效布局中被置 `0`，并将场上 R2 数和剩余必须抓取数各减 `1`。
+场外预吸取规划只在 QR 前三位含 `2` 时触发：如第二位为 `2` 则硬优先选择2号；否则在1/3号候选中规划，两者同时存在时比较内部路径总代价，相同代价选1号。选中的格子在有效布局中被置 `0`，并将场上 R2 数和剩余必须抓取数各减 `1`。
 
 ## 动作矩阵
 
@@ -347,7 +388,7 @@ race.REQUIRED_R2_PICKUP_COUNT = 2   # 必须拿取数，与场上R2总数独立
 - `height_action`：`0=不用上下楼`，`1=需要上下楼`；上/下由执行层根据真实台阶矩阵判断。
 - `grab_action`：`0=不抓取`，`1=R2 方块/KFS 抓取`。R1-KFS 按规则由 R1 移除，R2 经过 R1 格时必须输出 `0`。
 
-`utils/challenge_lib.py::build_action_matrix_with_pre_entry_pickup()` 生成的挑战赛完整矩阵会包含入口和出口动作。无场外吸取时，第一行是：
+`utils/challenge_lib.py::build_action_matrix_with_pre_entry_pickup()` 生成的挑战赛完整矩阵会包含入口和出口动作。以下方向码示例按红场写出；蓝场会按当前半场动态生成方向码。无场外吸取时，第一行是：
 
 ```python
 [-1, 2, 1, 1, 0]
@@ -371,7 +412,16 @@ race.REQUIRED_R2_PICKUP_COUNT = 2   # 必须拿取数，与场上R2总数独立
 
 `execute_action_row(...)` 在普通相邻性/方向校验前优先精确识别 `[-1,1,1,0,1]` 和 `[-1,3,1,0,1]`，直接调用 `module.side_suck(target_stair_id=1|3)`。只有这两种完整字段组合会启动侧吸；其他 `-1->1/3` 组合会进入常规校验并因非相邻而拒绝执行。`[-1,2,1,0,1]` 仍走普通方向抓取分支。
 
+普通梅林行进入 `move_dir != 0` 分支后会先读取原始 `from/to` 台阶坐标，再按当前动作类型套角度修正。KFS 吸取和上楼按 `move_dir` 修正，下楼按 `move_dir` 反方向修正；修正前后的坐标都会写入行结果。
+
 当前行的最终朝向默认取下一行 `from_pos -> to_pos` 的方向；如果下一行实际执行下楼（`height_action=1`、`grab_action=0` 且高低关系为 `2`），则使用该方向的反方向，使机器在进入 `descend()` 前已经按倒退下楼姿态对正。最后一行仍使用 `execute_action_matrix(final_direction=...)` 的传入值。
+
+连续上下楼的回中心优化：
+
+- 上楼：如果下一行同方向且同样是上楼，当前行跳过回到 `to_pose` 中心，`return_center_skip_reason="next_same_direction_higher_stair"`。
+- 下楼：只有下一行也是上下楼、方向相同且同样是下楼时跳过回中心。
+- 如果上一行因连续上楼跳过回中心，下一行上楼前的相对高台阶微调自动传 `high_stair_long_adjust=1`，即把高台阶前探从 `ch2=300,1s` 改为 `ch2=300,2s`。
+- KFS 吸取分支如果下一行是对同一目标台阶上楼，会跳过吸取后的回中心；否则吸取成功后回到 `from_pos` 中心。
 
 执行层当前只接入：
 
@@ -413,8 +463,9 @@ ch7: 1 -> 3 -> 1
 当前代码事实：
 
 - `lib2/move.py::climb()` 当前显式预置 `ch5=1, ch6=1, ch7=1`，再通过 `ch7:1->3->1` 触发上楼。
+- 上楼触发完成后固定等待 `DEFAULT_CLIMB_POST_TRIGGER_DELAY_SEC=3.7s`，再开始检测水平位移和高度条件。
 - `lib2/move.py::descend()` 当前显式预置 `ch5=1, ch6=3, ch7=1`，触发阶段只更新 `ch7=3`，结束后恢复 `ch5=1, ch6=1, ch7=1`。
-- `move.lock_wheel()` 通过 `ch5=1, ch6=2, ch7=1` 保持四轮锁角；`move.unlock_wheel()` 恢复 `ch5=1, ch6=1, ch7=1`。
+- `move.lock_wheel()` 预置 `ch5=1,ch6=2,ch7=1` 后触发 `ch7:1->3` 进入四轮锁角，并保持 `ch7=3`；`move.unlock_wheel()` 保持 `ch5=1,ch6=2` 并触发 `ch7:3->1` 离开锁轮。
 
 ## KFS 流程
 
@@ -438,6 +489,7 @@ ch9 = 吸盘旋转
 3 = 过渡姿态
 4 = 放置方块姿态
 5 = 侧吸姿态
+6 = 三层 KFS 放置姿态
 ```
 
 方块模式下 `ch4` 通过 `1->3` / `3->1` 控制抽气泵边沿，实际控制哪个泵由 V3 字段 `cylinderSelect` 决定：
@@ -457,7 +509,7 @@ ch9 = -500~-200：吸盘朝向 180deg，业务固定值为 -300
 ch9 < -700：吸盘朝向 -90deg，业务固定值为 -800
 ```
 
-业务代码只应发送 `800/300/-300/-800`，避免落入 `500~700`、`-700~-500`、`-200~200` 和边界值 `+/-700` 等未定义区间。新版姿态把“大臂姿态”和“吸盘角度”拆开配合使用；侧吸时使用 `ch5=2, ch6=5` 触发侧吸大臂姿态，再根据目标方向选择对应的 `ch9` 固定值。
+业务代码只应发送 `800/300/-300/-800`，避免落入 `500~700`、`-700~-500`、`-200~200` 和边界值 `+/-700` 等未定义区间。新版姿态把“大臂姿态”和“吸盘角度”拆开配合使用；侧吸时使用 `ch5=2, ch6=5` 触发侧吸大臂姿态，三层放置姿态使用 `kfs.place_3rd_kfs_pose()` 触发 `ch5=2,ch6=6,ch7` 边沿，再根据目标方向选择对应的 `ch9` 固定值。
 
 对应接口为 `kfs.sucker_0deg()`、`kfs.sucker_neg90deg()`、`kfs.sucker_180deg()`、`kfs.sucker_90deg()`；接口只更新 `ch9`，不切换 KFS 模式或触发大臂姿态。
 
@@ -475,6 +527,12 @@ suck_count = 2：吸盘头 180deg（ch9=-300），选择 PF3
 ```
 
 `kfs.kfs_grab_pose()` 在入口完成上述旋转和气缸选择，等待 `0.5s` 后再触发高/低吸取姿态。该方法只读取 `suck_count`，不在入口自增。
+
+`kfs.kfs_suck_preparation(sender,count)` 用于按准备吸取数量预先打开气缸：
+
+- `count=0`：不执行动作，直接返回。
+- `count=1`：调用 `_select_sucker_cylinder(...PF2...)` 选择第一个气缸，再复用 `_release_kfs_suction_with_lock(...keep_suction_on=True)` 触发并保持吸气，成功后 `suck_count += 1`。
+- `count=2`：调用 `sucker_select_both()` 选择双气缸，再复用 `_release_kfs_suction_with_lock(...keep_suction_on=True)` 触发并保持吸气，成功后 `suck_count += 2`。
 
 侧吸大臂姿态接口为 `kfs.kfs_side_pose()`，按 `ch5=2, ch6=5, ch7:1->3` 触发，默认预置 `0.1s`、触发保持 `1.0s`，且不修改 `ch4`。这是时间保持，不是控制器到位 ACK。
 
@@ -495,9 +553,9 @@ suck_count = 2：吸盘头 180deg（ch9=-300），选择 PF3
 1. 校验目标台阶只能为 `1/3`。
 2. 按原 `target_stair_id + suck_count` 分支先旋转吸盘头：目标1时 `count1->90deg`、`count2->-90deg`；目标3时 `count1->-90deg`、`count2->90deg`。
 3. 调用 `kfs.kfs_side_pose()` 切换 pose5，再按当前 `suck_count` 选择气缸：`1->PF2`、`2->PF3`。
-4. 调用 `move.side_suck_movement(...)`：先移动到 `-1` 台阶左右偏移 `0.5m` 的侧吸准备点，再以 `ch2=300` 前进 `1s` 做高位微调。红场目标 yaw 为 `90deg`，蓝场目标 yaw 为 `-90deg`，均通过四方向函数得到。
+4. 调用 `move.side_suck_movement(...)`：先以 `move_speed=350` 移动到 `-1` 台阶左右偏移 `0.5m` 的侧吸准备点，再以 `ch2=300` 前进 `1s` 做高位微调。红场目标 yaw 为 `90deg`，蓝场目标 yaw 为 `-90deg`，均通过四方向函数得到。该移动速度作为 `move_to_target()` 的平移向量幅值上限，按方向分配到 `ch0/ch2`，不是两个通道各给 `350`。
 5. 调用 `set_kfs_suction(suction_on=True,pose_id=5)` 对已选气缸吸取，保持 `ch4=3`。
-6. 调用 `move.side_suck_lateral_movement(...)` 做定时左右平移：目标1向左、目标3向右；默认 `ch0` 绝对值 `200`，持续 `2s`。
+6. 调用 `move.side_suck_lateral_movement(...)` 做定时左右平移：目标1向左、目标3向右；默认 `ch0` 绝对值 `100`，持续 `4s`，对应 `move.DEFAULT_SIDE_SUCK_LATERAL_CMD_ABS` 和 `move.DEFAULT_SIDE_SUCK_LATERAL_DURATION_SEC`。
 7. 横移完成后等待 `0.5s`，启动 `kfs.start_kfs_post_suction_thread()`，并同步将底盘移动回 `-1` 号台阶中心，回程航向沿用侧吸准备点 yaw。
 
 侧吸收尾线程与普通 KFS 共用同一逻辑：pose3 -> 等待默认 `3.0s` -> 根据 `suck_count` 预旋转 -> 等待 `0.5s` -> pose0 -> `suck_count += 1`。收尾线程异步运行，底盘回 `-1` 不等待线程完成。
@@ -526,12 +584,16 @@ suck_count = 2：吸盘头 180deg（ch9=-300），选择 PF3
 当前流程：
 
 1. 以 `weapon` 参考点移动到接近点。
-2. 以 `weapon` 参考点移动到 weapon 目标点，默认 `stop_distance=0.03`。
-3. 调用 `weapon.weapon_seize()`，通过 `ch4:3->1` 闭合夹爪，并复位模式通道。
-4. 调用 `weapon.weapon_up()`，通过 `ch1:0->100->0` 触发抬起并复位模式通道。
-5. 保持 `ch4=1` 的夹取状态，以 `robot` 参考点回到接近点。
-6. 原地旋转到释放前 yaw。
-7. 返回时保持 `ch1=0,ch4=1,ch5=1`；夹取气缸维持闭合状态。
+2. 以 `weapon` 参考点移动到 weapon 目标点，默认 `stop_distance=0.01`。
+3. 调用 `weapon.weapon_down()` 放下夹爪结构，并等待 `drop_before_grab_wait_sec=0.8s`。
+4. 调用 `weapon.weapon_seize()`，通过 `ch4:3->1` 闭合夹爪，并复位模式通道。
+5. 调用 `weapon.weapon_up()`，通过 `ch1:0->100->0` 触发抬起并复位模式通道。
+6. 保持 `ch4=1` 的夹取状态，以 `robot` 参考点回到接近点。
+7. 调用 `move.move_to_connection(...)` 预留衔接点移动；当前该方法是占位未实现，返回 `implemented=False` 时不会阻断 `fetch_weapon()`。
+8. 原地旋转到释放前 yaw。
+9. 返回时保持 `ch1=0,ch4=1,ch5=1`；夹取气缸维持闭合状态。
+
+`fetch_weapon(..., move_to_approach_point=0)` 会跳过第 1 步接近点移动，直接从当前位置以 `weapon` 参考点移动到 weapon 目标点；默认 `1` 保持原流程。
 
 释放/放下由调用方显式执行：
 
@@ -543,19 +605,18 @@ move.reset_weapon_after_fetch(sender)
 
 ## 完整流程入口
 
-`communication_competition/complete_blue.py` 是当前 QR + weapon 完整流程：
+当前区域级入口在 `lib2/compete_logic.py`：
 
-1. 设置蓝场 `FIELD_TYPE`。
-2. 启动后台 QR 扫描，扫描结果通过 `queue.Queue` 传给主线程。
-3. `module.init(lidar_type=1)`，启动 position 和 odom 线程。
-4. 短前进 `0.5s`，等待 robot pose 和 odom 稳定。
-5. `module.fetch_weapon(...)` 抓取 weapon。
-6. 等待视觉扫描锁，在锁内释放 weapon，并取完整 QR 动作矩阵。
-7. 移动到 `START_STAIR_ID=-1`。
-8. 直接执行 QR 矩阵；矩阵内部已包含可选场外吸取、`-1->2` 入口上楼和 `10->13` / `12->15` 出口行。
-9. 执行三段赛后固定移动，然后清理 ROS/socket/线程资源。
+1. `rigion_1(sender, position_runtime, odom_runtime, weapon_id=4, ...)`
+   启动后台 QR 识别线程，确认 `challenge_lib.SCANNER_RUNNING_LOCK` 已被扫码线程持有，然后调用 `module.fetch_weapon(...)` 抓 weapon。抓取完成后 `move.lock_wheel()`，等待 QR 线程释放全局锁；拿到锁后 `move.unlock_wheel()`、`weapon.weapon_loose()` 松开夹爪并原地等待 `5s`。扫码线程以 `put_action_matrix_only=True` 向队列放入动作矩阵。
+2. `rigion_2(sender, position_runtime, odom_runtime, action_matrix_queue, ...)`
+   从动作矩阵队列中取出 `action_matrix`，直接调用 `module.execute_action_matrix(...)` 执行完整梅林矩阵。
+3. `rigion_2_retry_plan(r1_count,r2_count,required_r2_pickup_count,qr_string,result_queue=None)`
+   调用方通过参数传入当前 R1/R2 数量、还要抓取的 R2 数量和 12 位场地字符串；函数内部做整数转换和 QR payload 校验，调用完整规划入口（含前三位预处理），并把新的 `action_matrix` 推入队列。该函数不再执行终端 `input()` 录入。
+4. `rigion_3(sender, position_runtime, odom_runtime, final_strategy=1, ...)`
+   先调用 `move.enter_battlefield()` 依次到 `pre_entrance9` 和 `entrance9`，再按 `final_strategy=1` 执行 `module.high_score190()`，按 `final_strategy=2` 执行 `module.totally_win()`。
 
-`communication_competition/rigion_1.py` / `rigion_2.py` 同样使用包含入口行的 QR 完整矩阵，已删除脚本内重复的 `module.climb(-1->2)`。`complete_red.py` 仍是另一套固定矩阵测试，它的入口上楼仍由脚本单独执行。
+当前还没有一个根脚本把 `rigion_1 -> rigion_2 -> rigion_3` 自动串起来；需要在比赛脚本中显式创建并传递同一个动作矩阵队列。
 
 红场赛后三点：
 
@@ -579,16 +640,17 @@ move.reset_weapon_after_fetch(sender)
 - `position_mid360.py` 的半场拆分不如 odin 完整；当前主入口仍以 odin 为主。
 - KFS、weapon、上下楼仍有大量按时间等待；没有控制器状态 ACK，硬件完成只能依赖时间或位姿条件。
 - V3 帧格式和新版上下楼触发语义已接入；旧 `place_kfs()` 和 `move.control_kfs_pose()` 已删除，放置动作当前使用 `kfs.place_kfs_pose()`、`kfs.sucker_release_pose()`、`kfs.release_kfs()` 和 `kfs.place_3rd_kfs()` 等新接口组合。
-- 方块模式 `cylinderSelect` 和四档 `ch9` 已有底层接口，普通双头吸取、场外 1/3 号侧吸和九宫格二/三层释放测试已接入；仍缺少可复用的完整九宫格区域流程封装。
-- 侧吸的 pose5 `1.0s`、横移后 `0.5s`、收尾 pose3 默认 `3.0s` 都是时间等待，没有机械臂到位 ACK；侧吸、横移持物和并发回 `-1` 尚未完整实机验证。
+- 方块模式 `cylinderSelect` 和四档 `ch9` 已有底层接口，普通双头吸取、场外 1/3 号侧吸和九宫格二/三层释放测试已接入；`compete_logic.rigion_3()` 已封装进入九宫格后的高分/大胜策略选择，但九宫格坐标仍需实测复核。
+- 侧吸的 pose5 `1.0s`、横移默认 `ch0=100,4s`、横移后 `0.5s`、收尾 pose3 默认 `3.0s` 都是时间等待，没有机械臂到位 ACK；侧吸、横移持物和并发回 `-1` 尚未完整实机验证。
+- RealSense D455 在小电脑上若日志显示 `USB=2.1`，即使插在标称 USB3 口也可能因实际链路降级导致 `Frame didn't arrive within 5000`；现场已确认恢复到 `USB=3.2` 后 `640x480@30` 彩色流可预热成功。后续排查以 `utils/process.py` 打印的 USB 模式和 `lsusb -t` 实际速率为准。
 - `challenge_lib` 场外规划成功后会在当前进程内将 R2 布局数和剩余抓取数各减 `1`；当前约定一次流程只进行一次成功规划。如后续支持多次规划，需要增加显式重置或局部规划上下文。
 - `execute_action_matrix()` 已在首个 `completed=False` 动作行停止并返回失败上下文；各主流入口会在矩阵失败后直接结束，不再继续赛后移动。当前仍无硬件 ACK，“成功”只能表示现有时间/位姿条件未报错。
-- 锁轮协议只明确 `ch5=1,ch6=2`，未明确锁存行为；当前实现按持续状态使用，切换模式后不承诺保持锁轮。
+- 锁轮协议使用 `ch5=1,ch6=2` 配合 `ch7` 边沿触发；当前实现按上升沿进入、下降沿离开处理，切换到其他模式后的锁轮保持行为仍需实机确认。
 - 旧 `lib/` 仍使用 `payload_len=0x1A`、旧 IP 且无 `cylinderSelect`；`test/level_1.py` 仍导入该旧库。`catch.py` 仍有 weapon `ch4=-100` 时序，这些都不属于当前协议主线。
 - 当前旋转关闭了位置保持，可能出现旋转漂移；这是当前代码事实，不是长期闭环方案。
 - 如果后续允许相邻等高普通移动，需要补 `height_action=0, grab_action=0` 的真实移动分支。
 - 如果调整 `race.pos_to_coord` 格子数量，必须同步 QR 长度、位置集合、出口行和台阶矩阵。
-- 九宫格坐标在 `position_odin.py` 中大多仍是 `0.0` 占位；`ultimate_test_script.py` 的二层箱子测试目前写死红场坐标 `(-0.950, -4.46, 180deg)`，蓝场或实测变更前不能直接视为通用流程。
+- 九宫格坐标在 `position_odin.py` 中仍有多处 `0.0` 占位；红场 `pre_entrance9/entrance9/column2` 已填入现场值但仍需实机复核。`ultimate_test_script.py` 的二层箱子测试目前写死红场原始坐标 `(-0.950, -4.46, 180deg)` 并套 `deg180_correction()`，蓝场或实测变更前不能直接视为通用流程。
 - 大多数硬件动作只能通过实机确认；语法检查和规划穷举不能证明控制器业务层已经执行正确。
 
 ## README 更新要求
@@ -605,15 +667,20 @@ move.reset_weapon_after_fetch(sender)
 
 ## 已知验证
 
-- 已读当前源码确认：`lib2/module.py`、`lib2/move.py`、`lib2/kfs.py`、`lib2/weapon.py`、`lib2/position_backend.py`、`lib2/position_resource.py`、`utils/race.py`、`utils/challenge_lib.py`、`utils/utils.py`、`communication_competition/complete_red.py`、`communication_competition/complete_blue.py`、`communication_competition/rigion_1.py`、`communication_competition/rigion_2.py`。
+- 已读当前源码确认：`lib2/module.py`、`lib2/move.py`、`lib2/kfs.py`、`lib2/weapon.py`、`lib2/compete_logic.py`、`lib2/position_backend.py`、`lib2/position_resource.py`、`utils/race.py`、`utils/challenge_lib.py`、`utils/utils.py`。
 - `R2H操作指南.docx` 的 KFS/ch9 内容相对滞后；当前 README 以 V3 帧、`cylinderSelect`、现场补充的 `ch6=5` 侧吸姿态、四档 `ch9` 角度及双头吸盘流程为准。
-- 已对 `ultimate_test_script.py`、`lib2/module.py`、`lib2/move.py`、`lib2/kfs.py`、`lib2/position_odin.py`、`lib2/position_mid360.py`、`lib2/position_resource.py`、`lib2/tools.py`、`utils/challenge_lib.py`、`utils/race.py`、`utils/process.py` 和 `utils/utils.py` 做过语法检查。
+- 已对 `ultimate_test_script.py`、`d455.py`、`lib2/module.py`、`lib2/move.py`、`lib2/kfs.py`、`lib2/compete_logic.py`、`lib2/position_odin.py`、`lib2/position_mid360.py`、`lib2/position_resource.py`、`lib2/tools.py`、`utils/challenge_lib.py`、`utils/race.py`、`utils/process.py` 和 `utils/utils.py` 做过语法检查。
 - 已用模拟 sender 检查双头吸盘的 `suck_count=1/2` 分派、后续旋转/回初态/计数时序，以及 `lock_wheel()` / `unlock_wheel()` 的通道组合。
 - 已用模拟上下文检查 `ultimate_test_script.py` 的锁轮/解锁菜单分派、初始区域 `fetch_weapon -> lock_wheel` 顺序、上下楼/普通 KFS 行生成，以及侧吸测试的 `current_stair_id=-1`校验和 `[-1,1|3,1,0,1]` 分派。
 - 已用模拟 sender/runtime 检查 `module.side_suck()` 四种目标/次数角度分派、气缸 -> 旋转 -> pose5 -> 吸取 -> 实时坐标横移 -> 等待 -> 收尾线程 -> 回 `-1` 的调用顺序。
+- 已对 `lib2/kfs.py` 新增 `kfs_suck_preparation()` 做语法检查；该方法复用已有 `_release_kfs_suction_with_lock(...keep_suction_on=True)` 打开并保持吸气，尚未做实机气缸联调。
+- 已将 `lib2/compete_logic.py::rigion_2_retry_plan(...)` 改为参数输入并做语法检查；调用方需要显式传入 `r1_count`、`r2_count`、`required_r2_pickup_count` 和 `qr_string`，不再等待终端录入。
+- 已将 `utils/process.py` 的 RealSense 打开流程改为设备枚举、候选流 fallback 和 warmup 重试；已用现场日志确认 `USB=2.1` 时 D455 可能首帧超时，`USB=3.2` 时 `640x480@30` 可预热成功。
+- 已新增 `d455.py` 独立后台线程式二维码测试脚本，用于区分 RealSense 取流、OpenCV 窗口和主流程扫码问题。
 - 已检查比赛模式 1/2、KFS 数量校验、场外 1/2/3 号候选规划，以及“无场外吸取时入口行在第一行，有场外吸取时在第二行”的矩阵顺序。
 - 已用模拟行结果检查 `execute_action_matrix()` 的全部成功、首行失败即停止、`stop_on_failed=False` 继续执行三种路径；失败行索引、原因和已执行行数均符合预期。
-- 上述 KFS 双头旋转、普通/侧吸、锁轮/解锁、完整梅林和九宫格放置/释放相关动作尚未在当前修改后做完整实机联调。
+- 已对本轮涉及的 `ultimate_test_script.py`、`lib2/tools.py`、`lib2/module.py`、`lib2/move.py` 做过语法检查；顶层恢复初态菜单、角度坐标修正、梅林行执行修正和九宫格 `180deg` 修正尚需实机复核。
+- 上述 KFS 双头旋转、普通/侧吸、`kfs_suck_preparation()`、锁轮/解锁、完整梅林和九宫格放置/释放相关动作尚未在当前修改后做完整实机联调。
 - `utils/race.py` 的 matplotlib 可视化有 SVG 兜底；matplotlib 不可用时会生成 `race_visualization.svg`。
 - 挑战赛完整矩阵已验证自动插入入口行 `[-1,2,1,1,0]`，并在最后到 `10/12` 时追加 `[10,13,1,1,0]` / `[12,15,1,1,0]`。
 - README 只描述当前代码状态；实机验证状态需要以现场日志和硬件反馈为准。

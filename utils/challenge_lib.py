@@ -51,10 +51,7 @@ GRAB_ACTION_NAMES = {
     1: "抓取",
 }
 
-EXIT_ACTION_TARGETS = {
-    10: 13,
-    12: 15,
-}
+EXIT_ACTION_TARGETS = {}
 ENTRY_FROM_POS = -1
 ENTRY_TO_POS = 2
 
@@ -125,6 +122,7 @@ def _entry_action_row():
 
 
 def _append_exit_action(rows):
+    # 13/15 已经作为出口辅助点进入 race.py 路径规划，不再由动作矩阵层额外追加。
     if not rows:
         return rows
 
@@ -239,10 +237,9 @@ def build_action_matrix_from_qr(qr_string):
     return action_matrix, path, kfs
 
 
-def _path_movement_cost(path):
-    """返回 race.py 0-1 BFS 使用的移动代价（夹取动作代价为 0）。"""
-    move_count = sum(isinstance(step, int) for step in path)
-    return max(0, move_count - 1)
+def _path_planning_cost(kfs, path):
+    """返回 race.py 当前代价配置下的场内规划总代价。"""
+    return race.calculate_path_cost(kfs, path)
 
 
 def build_action_matrix_with_pre_entry_pickup(qr_string):
@@ -251,7 +248,7 @@ def build_action_matrix_with_pre_entry_pickup(qr_string):
 
     - 前三位没有 2：将 -1->2 入口上楼行放在完整矩阵第一行。
     - 第二位是 2：优先清除 2 号格。
-    - 否则清除 1 号或 3 号格；两者都是 2 时分别规划，选移动代价较小者。
+    - 否则清除 1 号或 3 号格；两者都是 2 时分别规划，选规划总代价较小者。
     - 只要前三位中 2 的数量为 1/2/3，R2 布局数和剩余抓取数都只减 1。
     - 有场外预吸取时，预吸取行是第一行，-1->2 入口上楼行是第二行。
 
@@ -320,9 +317,11 @@ def build_action_matrix_with_pre_entry_pickup(qr_string):
                     candidate_errors.append((pickup_position, str(exc)))
                     continue
 
+                planning_cost = float(_path_planning_cost(effective_kfs, path))
                 candidate_results.append({
                     "pickup_position": int(pickup_position),
-                    "movement_cost": int(_path_movement_cost(path)),
+                    "movement_cost": planning_cost,
+                    "planning_cost": planning_cost,
                     "action_matrix": action_matrix,
                     "path": path,
                     "effective_kfs": effective_kfs,
@@ -338,7 +337,7 @@ def build_action_matrix_with_pre_entry_pickup(qr_string):
                     + (f": {error_text}" if error_text else "")
                 )
 
-            # 相同移动代价时保留 candidate_positions 的先后顺序，即1号优先于3号。
+            # 相同规划总代价时保留 candidate_positions 的先后顺序，即1号优先于3号。
             selected = min(
                 candidate_results,
                 key=lambda result: result["movement_cost"],

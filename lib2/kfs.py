@@ -173,6 +173,71 @@ def _repeat_set_channel_values(sender, channel_values, duration_sec, loop_interv
     return move_lib.set_channel_values(sender, channel_values=channel_values)
 
 
+def kfs_suck_preparation(
+    sender,
+    count,
+    edge_arm_sec=0.1,
+    edge_hold_sec=0.1,
+    loop_interval_sec=0.02,
+):
+    """
+    根据准备吸取的 KFS 数量预先打开对应气缸吸气。
+
+    count=0: 不执行动作，直接返回。
+    count=1: 选择第一个气缸 PF2，触发 ch4:1->3，suck_count += 1。
+    count=2: 选择双气缸 PF2/PF3，触发 ch4:1->3，suck_count += 2。
+    """
+    global suck_count
+
+    try:
+        count = int(count)
+    except (TypeError, ValueError):
+        raise ValueError(f"count must be 0, 1, or 2, got {count!r}")
+    if count not in (0, 1, 2):
+        raise ValueError(f"count must be 0, 1, or 2, got {count}")
+
+    suck_count_before = int(suck_count)
+    if count == 0:
+        return {
+            "completed": True,
+            "executed": False,
+            "count": 0,
+            "suck_count_before": suck_count_before,
+            "suck_count_after": int(suck_count),
+            "cylinder_selection_result": None,
+            "suction_result": None,
+        }
+
+    if count == 1:
+        cylinder_selection_result = _select_sucker_cylinder(
+            sender,
+            cylinder_select=tools.CYLINDER_SELECT_PF2,
+            selection_name="pf2",
+        )
+    else:
+        cylinder_selection_result = sucker_select_both(sender)
+
+    suction_result = _release_kfs_suction_with_lock(
+        sender=sender,
+        edge_arm_sec=edge_arm_sec,
+        edge_hold_sec=edge_hold_sec,
+        loop_interval_sec=loop_interval_sec,
+        keep_suction_on=True,
+    )
+    if suction_result.get("completed", False):
+        suck_count += count
+
+    return {
+        "completed": bool(suction_result.get("completed", False)),
+        "executed": True,
+        "count": int(count),
+        "suck_count_before": suck_count_before,
+        "suck_count_after": int(suck_count),
+        "cylinder_selection_result": cylinder_selection_result,
+        "suction_result": suction_result,
+    }
+
+
 def _trigger_kfs_pose_with_lock(
     sender,
     pose_id,
@@ -293,6 +358,24 @@ def place_kfs_pose(
     return _trigger_kfs_pose_with_lock(
         sender=sender,
         pose_id=4,
+        arm_sec=arm_sec,
+        fire_sec=fire_sec,
+        loop_interval_sec=loop_interval_sec,
+    )
+
+
+def place_3rd_kfs_pose(
+    sender,
+    arm_sec=0.1,
+    fire_sec=0.4,
+    loop_interval_sec=0.02,
+):
+    """
+    KFS 三层放置姿态：pose_id=6，只控制 ch5/ch6/ch7，不修改吸盘 ch4。
+    """
+    return _trigger_kfs_pose_with_lock(
+        sender=sender,
+        pose_id=6,
         arm_sec=arm_sec,
         fire_sec=fire_sec,
         loop_interval_sec=loop_interval_sec,

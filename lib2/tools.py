@@ -343,6 +343,71 @@ def yaw_deg_to_i16(yaw_deg):
     return _clamp_i16(round(yaw_deg * 100.0))
 
 
+RED_LIDAR_CORRECTION_BY_YAW = {
+    0.01: (0.000, 0.000),
+    90.00: (-0.050, -0.067),
+    180.00: (0.025, -0.151),
+    -90.00: (0.104, -0.081),
+}
+
+BLUE_LIDAR_CORRECTION_BY_YAW = {
+    0.01: (0.000, 0.000),
+    90.00: (-0.050, -0.067),
+    180.00: (0.025, -0.151),
+    -90.00: (0.104, -0.081),
+}
+
+
+def _get_lidar_correction_table():
+    from lib2 import position_backend
+
+    if position_backend.is_blue_field():
+        return BLUE_LIDAR_CORRECTION_BY_YAW
+    return RED_LIDAR_CORRECTION_BY_YAW
+
+
+def _apply_lidar_correction(x, y, yaw_deg):
+    correction_table = _get_lidar_correction_table()
+    yaw_deg = round(float(yaw_deg), 2)
+    if yaw_deg not in correction_table:
+        print(f"{_apply_lidar_correction.__name__}输入错误: yaw_deg={yaw_deg}")
+        sys.exit(1)
+
+    dx, dy = correction_table[yaw_deg]
+    return float(x) + float(dx), float(y) + float(dy)
+
+
+def deg0_correction(x, y):
+    return _apply_lidar_correction(x, y, 0.01)
+
+
+def deg90_correction(x, y):
+    return _apply_lidar_correction(x, y, 90.00)
+
+
+def neg90_correction(x, y):
+    return _apply_lidar_correction(x, y, -90.00)
+
+
+def deg180_correction(x, y):
+    return _apply_lidar_correction(x, y, 180.00)
+
+
+def deg_correction(target_deg, x, y):
+    target_deg = round(yaw_normalization(float(target_deg)), 2)
+    if abs(target_deg) <= 0.02:
+        return deg0_correction(x, y)
+    if target_deg == 90.00:
+        return deg90_correction(x, y)
+    if target_deg == -90.00:
+        return neg90_correction(x, y)
+    if target_deg in (180.00, -180.00):
+        return deg180_correction(x, y)
+
+    print(f"{deg_correction.__name__}输入错误: target_deg={target_deg}")
+    sys.exit(1)
+
+
 def direction_int_to_yaw_deg(direction):
     direction = int(direction)
     if direction not in (1, 2, 3, 4):

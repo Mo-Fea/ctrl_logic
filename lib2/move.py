@@ -61,8 +61,8 @@ DEFAULT_MOVE_PID_INTEGRAL_LIMIT = 1.0
 DEFAULT_LATERAL_CMD_SIGN = -1
 DEFAULT_FORWARD_CMD_SIGN = 1
 # 侧吸定时平移默认参数，便于现场调试。
-DEFAULT_SIDE_SUCK_LATERAL_CMD_ABS = 200
-DEFAULT_SIDE_SUCK_LATERAL_DURATION_SEC = 2.0
+DEFAULT_SIDE_SUCK_LATERAL_CMD_ABS = 100
+DEFAULT_SIDE_SUCK_LATERAL_DURATION_SEC = 4.0
 # 进入近点区后的前进通道值。
 DEFAULT_NEAR_FORWARD_CMD = 100
 # 近点区距离阈值，距离小于该值后使用 DEFAULT_NEAR_FORWARD_CMD，单位 m。
@@ -78,7 +78,7 @@ DEFAULT_OVERSHOOT_CHECK_DISTANCE = 0.15
 # 连续多少帧满足过点检测后锁定为已经冲过目标点。
 DEFAULT_OVERSHOOT_CONFIRM_COUNT = 3
 # 到点距离阈值，距离小于该值后认为位置满足到点条件，单位 m。
-DEFAULT_STOP_DISTANCE = 0.065
+DEFAULT_STOP_DISTANCE = 0.02
 # 到点速度阈值，平面线速度小于该值后认为速度足够低，单位 m/s。
 DEFAULT_REACHED_SPEED_MPS = 0.05
 # 到点 yaw 角速度阈值，角速度小于该值后认为旋转足够稳定，单位 rad/s。
@@ -101,6 +101,8 @@ DEFAULT_CLIMB_MIN_DISTANCE = 0.4
 DEFAULT_CLIMB_TRIGGER_HOLD_SEC = 0.3
 # 上楼梯触发前用于形成 1 -> 3 上升沿的预置时间，单位 s。
 DEFAULT_CLIMB_TRIGGER_ARM_SEC = 0.1
+# 上楼梯触发完成后的固定等待时间，单位 s。
+DEFAULT_CLIMB_POST_TRIGGER_DELAY_SEC = 3.7
 # 上楼梯流程最大允许时间，超过该时间后打印错误并终止程序，单位 s。
 DEFAULT_CLIMB_TIMEOUT_SEC = 15.0
 # 下楼梯触发通道保持时间，单位 s。
@@ -129,12 +131,32 @@ DESCEND_FUNCTION_CHANNEL_INDEX = 6
 DESCEND_FUNCTION_VALUE = 3
 # 四轮锁角子功能值，ch6 == 2。
 WHEEL_LOCK_FUNCTION_VALUE = 2
-# 解锁后恢复的升降模式空闲子功能值。
-WHEEL_UNLOCK_FUNCTION_VALUE = 1
+# 四轮锁角触发前等待时间，单位 s。
+DEFAULT_WHEEL_LOCK_TRIGGER_ARM_SEC = 0.1
+# 四轮锁角触发边沿保持时间，单位 s。
+DEFAULT_WHEEL_LOCK_TRIGGER_HOLD_SEC = 0.3
 # KFS 姿态触发前等待时间，供 lib2.kfs 使用，单位 s。
 DEFAULT_KFS_POSE_ARM_WAIT_SEC = 0.5
 # KFS 姿态触发后保持输出等待时间，供 lib2.kfs 使用，单位 s。
 DEFAULT_KFS_POSE_HOLD_SEC = 2.0
+
+
+def _get_corrected_battlefield_coordinate(position_lib_module, coordinate_name):
+    if not hasattr(position_lib_module, coordinate_name):
+        raise AttributeError(
+            f"{position_lib_module.__name__} must define {coordinate_name}"
+        )
+
+    raw_x, raw_y = getattr(position_lib_module, coordinate_name)
+    corrected_x, corrected_y = tools.deg180_correction(raw_x, raw_y)
+    return {
+        "coordinate_name": coordinate_name,
+        "raw_x": float(raw_x),
+        "raw_y": float(raw_y),
+        "x": float(corrected_x),
+        "y": float(corrected_y),
+        "correction_yaw_deg": 180.0,
+    }
 
 
 def normalize_yaw_deg(yaw_deg):
@@ -548,39 +570,89 @@ def reset_weapon_after_fetch(sender, settle_sec=1.0):
     }
 
 
-def lock_wheel(sender):
-    """进入升降模式的四轮锁角状态，并持续保持该输出。"""
+def lock_wheel(
+    sender,
+    trigger_arm_sec=DEFAULT_WHEEL_LOCK_TRIGGER_ARM_SEC,
+    trigger_hold_sec=DEFAULT_WHEEL_LOCK_TRIGGER_HOLD_SEC,
+    loop_interval_sec=DEFAULT_DRIVE_LOOP_INTERVAL_SEC,
+):
+    """通过 ch7 上升沿进入四轮锁角状态。"""
     with tools.AUTO_TRIGGER_LOCK:
-        channels = set_channel_values(
-            sender,
-            channel_values={
-                CLIMB_MODE_CHANNEL_INDEX: CLIMB_MODE_VALUE,
-                CLIMB_FUNCTION_CHANNEL_INDEX: WHEEL_LOCK_FUNCTION_VALUE,
-                CLIMB_TRIGGER_CHANNEL_INDEX: CLIMB_TRIGGER_IDLE_VALUE,
-            },
-        )
+        arm_channel_values = {
+            CLIMB_MODE_CHANNEL_INDEX: CLIMB_MODE_VALUE,
+            CLIMB_FUNCTION_CHANNEL_INDEX: WHEEL_LOCK_FUNCTION_VALUE,
+            CLIMB_TRIGGER_CHANNEL_INDEX: CLIMB_TRIGGER_ARM_VALUE,
+        }
+        arm_channels = set_channel_values(sender, channel_values=arm_channel_values)
+        arm_deadline = tools.time.time() + float(trigger_arm_sec)
+        while tools.time.time() < arm_deadline:
+            arm_channels = set_channel_values(sender, channel_values=arm_channel_values)
+            tools.time.sleep(loop_interval_sec)
+
+        fire_channel_values = {
+            CLIMB_MODE_CHANNEL_INDEX: CLIMB_MODE_VALUE,
+            CLIMB_FUNCTION_CHANNEL_INDEX: WHEEL_LOCK_FUNCTION_VALUE,
+            CLIMB_TRIGGER_CHANNEL_INDEX: CLIMB_TRIGGER_FIRE_VALUE,
+        }
+        fire_channels = set_channel_values(sender, channel_values=fire_channel_values)
+        fire_deadline = tools.time.time() + float(trigger_hold_sec)
+        while tools.time.time() < fire_deadline:
+            fire_channels = set_channel_values(sender, channel_values=fire_channel_values)
+            tools.time.sleep(loop_interval_sec)
+
+        channels = set_channel_values(sender, channel_values=fire_channel_values)
     return {
         "action": "lock_wheel",
         "locked": True,
+        "trigger_edge": "rising",
+        "trigger_arm_sec": float(trigger_arm_sec),
+        "trigger_hold_sec": float(trigger_hold_sec),
+        "arm_channels": arm_channels,
+        "fire_channels": fire_channels,
         "channels": channels,
         "completed": True,
     }
 
 
-def unlock_wheel(sender):
-    """退出四轮锁角，恢复升降模式空闲通道值。"""
+def unlock_wheel(
+    sender,
+    trigger_arm_sec=DEFAULT_WHEEL_LOCK_TRIGGER_ARM_SEC,
+    trigger_hold_sec=DEFAULT_WHEEL_LOCK_TRIGGER_HOLD_SEC,
+    loop_interval_sec=DEFAULT_DRIVE_LOOP_INTERVAL_SEC,
+):
+    """通过 ch7 下降沿退出四轮锁角状态。"""
     with tools.AUTO_TRIGGER_LOCK:
-        channels = set_channel_values(
-            sender,
-            channel_values={
-                CLIMB_MODE_CHANNEL_INDEX: CLIMB_MODE_VALUE,
-                CLIMB_FUNCTION_CHANNEL_INDEX: WHEEL_UNLOCK_FUNCTION_VALUE,
-                CLIMB_TRIGGER_CHANNEL_INDEX: CLIMB_TRIGGER_IDLE_VALUE,
-            },
-        )
+        arm_channel_values = {
+            CLIMB_MODE_CHANNEL_INDEX: CLIMB_MODE_VALUE,
+            CLIMB_FUNCTION_CHANNEL_INDEX: WHEEL_LOCK_FUNCTION_VALUE,
+            CLIMB_TRIGGER_CHANNEL_INDEX: CLIMB_TRIGGER_FIRE_VALUE,
+        }
+        arm_channels = set_channel_values(sender, channel_values=arm_channel_values)
+        arm_deadline = tools.time.time() + float(trigger_arm_sec)
+        while tools.time.time() < arm_deadline:
+            arm_channels = set_channel_values(sender, channel_values=arm_channel_values)
+            tools.time.sleep(loop_interval_sec)
+
+        fire_channel_values = {
+            CLIMB_MODE_CHANNEL_INDEX: CLIMB_MODE_VALUE,
+            CLIMB_FUNCTION_CHANNEL_INDEX: WHEEL_LOCK_FUNCTION_VALUE,
+            CLIMB_TRIGGER_CHANNEL_INDEX: CLIMB_TRIGGER_IDLE_VALUE,
+        }
+        fire_channels = set_channel_values(sender, channel_values=fire_channel_values)
+        fire_deadline = tools.time.time() + float(trigger_hold_sec)
+        while tools.time.time() < fire_deadline:
+            fire_channels = set_channel_values(sender, channel_values=fire_channel_values)
+            tools.time.sleep(loop_interval_sec)
+
+        channels = set_channel_values(sender, channel_values=fire_channel_values)
     return {
         "action": "unlock_wheel",
         "locked": False,
+        "trigger_edge": "falling",
+        "trigger_arm_sec": float(trigger_arm_sec),
+        "trigger_hold_sec": float(trigger_hold_sec),
+        "arm_channels": arm_channels,
+        "fire_channels": fire_channels,
         "channels": channels,
         "completed": True,
     }
@@ -652,6 +724,212 @@ def drive_with_channels_for_duration(
         "brake_duration_sec": float(brake_duration_sec),
         "completed": True,
     }
+
+
+def _get_odometry_speed_scalar(odom_runtime, max_age_sec=DEFAULT_ODOM_MAX_AGE_SEC):
+    if odom_runtime is None:
+        return None
+
+    get_velocity = getattr(odom_runtime, "get_velocity", None)
+    if get_velocity is not None:
+        velocity = get_velocity(max_age_sec=max_age_sec)
+    else:
+        get_odometry = getattr(odom_runtime, "get_odometry", None)
+        if get_odometry is None:
+            return None
+        velocity = get_odometry(max_age_sec=max_age_sec)
+
+    if velocity is None:
+        return None
+
+    linear_x = float(velocity["linear_x"])
+    linear_y = float(velocity["linear_y"])
+    if not values_are_finite(linear_x, linear_y):
+        return None
+    return math.hypot(linear_x, linear_y)
+
+
+def _drive_till_collision(
+    sender,
+    odom_runtime,
+    direction,
+    value,
+    channel_index,
+    channel_name,
+    collision_speed_floor_mps=0.2,
+    confirm_frame_count=5,
+    loop_interval_sec=DEFAULT_DRIVE_LOOP_INTERVAL_SEC,
+    odom_max_age_sec=DEFAULT_ODOM_MAX_AGE_SEC,
+):
+    try:
+        direction = int(direction)
+        value = int(value)
+    except (TypeError, ValueError):
+        raise ValueError(
+            f"direction and value must be int, got direction={direction}, value={value}"
+        )
+
+    if direction not in (-1, 1):
+        raise ValueError(f"direction must be -1 or 1, got {direction}")
+    if value <= 0 or value > 600:
+        raise ValueError(f"value must be in 1..600, got {value}")
+
+    confirm_frame_count = int(confirm_frame_count)
+    if confirm_frame_count <= 0:
+        raise ValueError(
+            f"confirm_frame_count must be > 0, got {confirm_frame_count}"
+        )
+
+    loop_interval_sec = float(loop_interval_sec)
+    if loop_interval_sec <= 0.0:
+        raise ValueError(f"loop_interval_sec must be > 0, got {loop_interval_sec}")
+
+    collision_speed_floor_mps = float(collision_speed_floor_mps)
+    if collision_speed_floor_mps < 0.0:
+        raise ValueError(
+            "collision_speed_floor_mps must be >= 0, "
+            f"got {collision_speed_floor_mps}"
+        )
+
+    channel_value = direction * abs(value)
+    max_velocity = 0.0
+    confirm_count = 0
+    valid_frame_count = 0
+    latest_speed_mps = None
+    channels = None
+    stop_channels = None
+
+    try:
+        while True:
+            channels = set_channel_values(
+                sender,
+                channel_values={int(channel_index): int(channel_value)},
+            )
+
+            current_speed_mps = _get_odometry_speed_scalar(
+                odom_runtime,
+                max_age_sec=odom_max_age_sec,
+            )
+            if current_speed_mps is None:
+                tools.time.sleep(loop_interval_sec)
+                continue
+
+            latest_speed_mps = float(current_speed_mps)
+            valid_frame_count += 1
+            if latest_speed_mps > max_velocity:
+                max_velocity = latest_speed_mps
+
+            collision_detected = (
+                max_velocity >= collision_speed_floor_mps
+                and (max_velocity - latest_speed_mps)
+                > (max_velocity - collision_speed_floor_mps)
+            )
+            if collision_detected:
+                confirm_count += 1
+            else:
+                confirm_count = 0
+
+            if confirm_count >= confirm_frame_count:
+                break
+
+            tools.time.sleep(loop_interval_sec)
+    finally:
+        stop_channels = set_channel_values(
+            sender,
+            channel_values={int(channel_index): 0},
+        )
+
+    return {
+        "completed": True,
+        "channel_index": int(channel_index),
+        "channel_name": str(channel_name),
+        "direction": int(direction),
+        "value": int(value),
+        "channel_value": int(channel_value),
+        "max_velocity_mps": float(max_velocity),
+        "latest_speed_mps": latest_speed_mps,
+        "collision_speed_floor_mps": float(collision_speed_floor_mps),
+        "confirm_frame_count": int(confirm_frame_count),
+        "valid_frame_count": int(valid_frame_count),
+        "channels": channels,
+        "stop_channels": stop_channels,
+    }
+
+
+def fb_till_collision(
+    sender,
+    odom_runtime,
+    direction,
+    value,
+    collision_speed_floor_mps=0.2,
+    confirm_frame_count=5,
+    loop_interval_sec=DEFAULT_DRIVE_LOOP_INTERVAL_SEC,
+    odom_max_age_sec=DEFAULT_ODOM_MAX_AGE_SEC,
+):
+    """
+    前后方向持续运动直到速度标量跌回阈值，direction=1 前进，-1 后退。
+    """
+    return _drive_till_collision(
+        sender=sender,
+        odom_runtime=odom_runtime,
+        direction=direction,
+        value=value,
+        channel_index=2,
+        channel_name="ch2",
+        collision_speed_floor_mps=collision_speed_floor_mps,
+        confirm_frame_count=confirm_frame_count,
+        loop_interval_sec=loop_interval_sec,
+        odom_max_age_sec=odom_max_age_sec,
+    )
+
+
+def lr_till_collision(
+    sender,
+    odom_runtime,
+    direction,
+    value,
+    collision_speed_floor_mps=0.2,
+    confirm_frame_count=5,
+    loop_interval_sec=DEFAULT_DRIVE_LOOP_INTERVAL_SEC,
+    odom_max_age_sec=DEFAULT_ODOM_MAX_AGE_SEC,
+):
+    """
+    左右方向持续运动直到速度标量跌回阈值，direction=1 右移，-1 左移。
+    """
+    return _drive_till_collision(
+        sender=sender,
+        odom_runtime=odom_runtime,
+        direction=direction,
+        value=value,
+        channel_index=0,
+        channel_name="ch0",
+        collision_speed_floor_mps=collision_speed_floor_mps,
+        confirm_frame_count=confirm_frame_count,
+        loop_interval_sec=loop_interval_sec,
+        odom_max_age_sec=odom_max_age_sec,
+    )
+
+
+def _till_collision(
+    sender,
+    odom_runtime,
+    direction,
+    value,
+    collision_speed_floor_mps=0.2,
+    confirm_frame_count=5,
+    loop_interval_sec=DEFAULT_DRIVE_LOOP_INTERVAL_SEC,
+    odom_max_age_sec=DEFAULT_ODOM_MAX_AGE_SEC,
+):
+    return lr_till_collision(
+        sender=sender,
+        odom_runtime=odom_runtime,
+        direction=direction,
+        value=value,
+        collision_speed_floor_mps=collision_speed_floor_mps,
+        confirm_frame_count=confirm_frame_count,
+        loop_interval_sec=loop_interval_sec,
+        odom_max_age_sec=odom_max_age_sec,
+    )
 
 
 def distance_to_target_xy(current_x, current_y, target_x, target_y):
@@ -915,12 +1193,12 @@ def move_to_2rd_place(
         coordinate_name = "column2_red"
         target_direction = 2
 
-    if not hasattr(current_position_lib, coordinate_name):
-        raise AttributeError(
-            f"{current_position_lib.__name__} must define {coordinate_name}"
-        )
-
-    target_x, target_y = getattr(current_position_lib, coordinate_name)
+    target = _get_corrected_battlefield_coordinate(
+        current_position_lib,
+        coordinate_name,
+    )
+    target_x = target["x"]
+    target_y = target["y"]
     target_yaw_deg = tools.direction_int_to_yaw_deg(target_direction)
 
     move_result = move_to_target(
@@ -945,11 +1223,39 @@ def move_to_2rd_place(
             else "move_to_2rd_place"
         ),
         "coordinate_name": coordinate_name,
+        "raw_target_x": float(target["raw_x"]),
+        "raw_target_y": float(target["raw_y"]),
         "target_x": float(target_x),
         "target_y": float(target_y),
+        "coordinate_correction_yaw_deg": float(target["correction_yaw_deg"]),
         "target_direction": int(target_direction),
         "target_yaw_deg": float(target_yaw_deg),
         "move_result": move_result,
+    }
+
+
+def move_to_connection(
+    sender,
+    position_runtime,
+    odom_runtime,
+    cruise_forward_cmd=DEFAULT_MOVE_FORWARD_CMD,
+    timeout_sec=None,
+    reference="robot",
+    **kwargs,
+):
+    """
+    移动到九宫格衔接点的占位接口。
+
+    该方法预留给完整比赛流程中的区域衔接移动，目前暂未实现真实运动。
+    """
+    return {
+        "completed": False,
+        "implemented": False,
+        "failed_step": "move_to_connection_not_implemented",
+        "cruise_forward_cmd": int(cruise_forward_cmd),
+        "timeout_sec": None if timeout_sec is None else float(timeout_sec),
+        "reference": str(reference),
+        "move_result": None,
     }
 
 
@@ -985,17 +1291,18 @@ def enter_battlefield(
         field_name = "red"
         target_direction = 2
 
-    for coordinate_name in (pre_coordinate_name, entrance_coordinate_name):
-        if not hasattr(current_position_lib, coordinate_name):
-            raise AttributeError(
-                f"{current_position_lib.__name__} must define {coordinate_name}"
-            )
-
-    pre_target_x, pre_target_y = getattr(current_position_lib, pre_coordinate_name)
-    entrance_target_x, entrance_target_y = getattr(
+    pre_target = _get_corrected_battlefield_coordinate(
+        current_position_lib,
+        pre_coordinate_name,
+    )
+    entrance_target = _get_corrected_battlefield_coordinate(
         current_position_lib,
         entrance_coordinate_name,
     )
+    pre_target_x = pre_target["x"]
+    pre_target_y = pre_target["y"]
+    entrance_target_x = entrance_target["x"]
+    entrance_target_y = entrance_target["y"]
     target_yaw_deg = tools.direction_int_to_yaw_deg(target_direction)
 
     pre_move_result = move_to_target(
@@ -1022,13 +1329,19 @@ def enter_battlefield(
             "target_yaw_deg": float(target_yaw_deg),
             "pre_target": {
                 "coordinate_name": pre_coordinate_name,
+                "raw_x": float(pre_target["raw_x"]),
+                "raw_y": float(pre_target["raw_y"]),
                 "x": float(pre_target_x),
                 "y": float(pre_target_y),
+                "correction_yaw_deg": float(pre_target["correction_yaw_deg"]),
             },
             "entrance_target": {
                 "coordinate_name": entrance_coordinate_name,
+                "raw_x": float(entrance_target["raw_x"]),
+                "raw_y": float(entrance_target["raw_y"]),
                 "x": float(entrance_target_x),
                 "y": float(entrance_target_y),
+                "correction_yaw_deg": float(entrance_target["correction_yaw_deg"]),
             },
             "pre_move_result": pre_move_result,
             "entrance_move_result": None,
@@ -1058,13 +1371,19 @@ def enter_battlefield(
         "target_yaw_deg": float(target_yaw_deg),
         "pre_target": {
             "coordinate_name": pre_coordinate_name,
+            "raw_x": float(pre_target["raw_x"]),
+            "raw_y": float(pre_target["raw_y"]),
             "x": float(pre_target_x),
             "y": float(pre_target_y),
+            "correction_yaw_deg": float(pre_target["correction_yaw_deg"]),
         },
         "entrance_target": {
             "coordinate_name": entrance_coordinate_name,
+            "raw_x": float(entrance_target["raw_x"]),
+            "raw_y": float(entrance_target["raw_y"]),
             "x": float(entrance_target_x),
             "y": float(entrance_target_y),
+            "correction_yaw_deg": float(entrance_target["correction_yaw_deg"]),
         },
         "pre_move_result": pre_move_result,
         "entrance_move_result": entrance_move_result,
@@ -1101,14 +1420,18 @@ def climb_R1_movement(
         climb_coordinate_name = "climb_R2_red"
         target_direction = 2
 
-    for coordinate_name in (pre_coordinate_name, climb_coordinate_name):
-        if not hasattr(current_position_lib, coordinate_name):
-            raise AttributeError(
-                f"{current_position_lib.__name__} must define {coordinate_name}"
-            )
-
-    pre_target_x, pre_target_y = getattr(current_position_lib, pre_coordinate_name)
-    climb_target_x, climb_target_y = getattr(current_position_lib, climb_coordinate_name)
+    pre_target = _get_corrected_battlefield_coordinate(
+        current_position_lib,
+        pre_coordinate_name,
+    )
+    climb_target = _get_corrected_battlefield_coordinate(
+        current_position_lib,
+        climb_coordinate_name,
+    )
+    pre_target_x = pre_target["x"]
+    pre_target_y = pre_target["y"]
+    climb_target_x = climb_target["x"]
+    climb_target_y = climb_target["y"]
     target_yaw_deg = tools.direction_int_to_yaw_deg(target_direction)
 
     pre_move_result = move_to_target(
@@ -1134,13 +1457,19 @@ def climb_R1_movement(
             "target_yaw_deg": float(target_yaw_deg),
             "pre_target": {
                 "coordinate_name": pre_coordinate_name,
+                "raw_x": float(pre_target["raw_x"]),
+                "raw_y": float(pre_target["raw_y"]),
                 "x": float(pre_target_x),
                 "y": float(pre_target_y),
+                "correction_yaw_deg": float(pre_target["correction_yaw_deg"]),
             },
             "climb_target": {
                 "coordinate_name": climb_coordinate_name,
+                "raw_x": float(climb_target["raw_x"]),
+                "raw_y": float(climb_target["raw_y"]),
                 "x": float(climb_target_x),
                 "y": float(climb_target_y),
+                "correction_yaw_deg": float(climb_target["correction_yaw_deg"]),
             },
             "pre_move_result": pre_move_result,
             "climb_move_result": None,
@@ -1169,13 +1498,19 @@ def climb_R1_movement(
         "target_yaw_deg": float(target_yaw_deg),
         "pre_target": {
             "coordinate_name": pre_coordinate_name,
+            "raw_x": float(pre_target["raw_x"]),
+            "raw_y": float(pre_target["raw_y"]),
             "x": float(pre_target_x),
             "y": float(pre_target_y),
+            "correction_yaw_deg": float(pre_target["correction_yaw_deg"]),
         },
         "climb_target": {
             "coordinate_name": climb_coordinate_name,
+            "raw_x": float(climb_target["raw_x"]),
+            "raw_y": float(climb_target["raw_y"]),
             "x": float(climb_target_x),
             "y": float(climb_target_y),
+            "correction_yaw_deg": float(climb_target["correction_yaw_deg"]),
         },
         "pre_move_result": pre_move_result,
         "climb_move_result": climb_move_result,
@@ -1802,6 +2137,7 @@ def climb(
     min_distance=DEFAULT_CLIMB_MIN_DISTANCE,
     trigger_hold_sec=DEFAULT_CLIMB_TRIGGER_HOLD_SEC,
     trigger_arm_sec=DEFAULT_CLIMB_TRIGGER_ARM_SEC,
+    post_trigger_delay_sec=DEFAULT_CLIMB_POST_TRIGGER_DELAY_SEC,
     loop_interval_sec=DEFAULT_DRIVE_LOOP_INTERVAL_SEC,
     timeout_sec=DEFAULT_CLIMB_TIMEOUT_SEC,
 ):
@@ -1813,8 +2149,9 @@ def climb(
     2. 输出升降模式 ch5=1，底盘通道 ch0/ch2/ch3 保持 0。
     3. ch7 先置 1，再置 3，形成 1 -> 3 上升沿触发半自动上楼梯。
     4. ch7=3 保持 trigger_hold_sec 后回归 1。
-    5. 阻塞等待水平位移大于 min_distance，且 current_z - 0.15 > start_z。
-    6. 总流程超过 timeout_sec 后打印“上楼梯错误”并终止程序。
+    5. 触发完成后固定等待 post_trigger_delay_sec。
+    6. 阻塞等待水平位移大于 min_distance，且 current_z - 0.15 > start_z。
+    7. 总流程超过 timeout_sec 后打印“上楼梯错误”并终止程序。
     """
     start_position = position_runtime.get_current_position()
     if start_position is None:
@@ -1847,6 +2184,14 @@ def climb(
         idle_channel_values = climb_channel_values(CLIMB_TRIGGER_IDLE_VALUE)
         idle_channels = set_channel_values(sender, channel_values=idle_channel_values)
 
+    post_trigger_delay_sec = float(post_trigger_delay_sec)
+    if post_trigger_delay_sec < 0.0:
+        raise ValueError(
+            f"post_trigger_delay_sec must be >= 0, got {post_trigger_delay_sec}"
+        )
+    if post_trigger_delay_sec > 0.0:
+        tools.time.sleep(post_trigger_delay_sec)
+
     deadline = None if timeout_sec is None else (tools.time.time() + float(timeout_sec))
     result = {
         "start_x": start_x,
@@ -1854,6 +2199,7 @@ def climb(
         "start_z": start_z,
         "min_distance": float(min_distance),
         "z_margin": 0.15,
+        "post_trigger_delay_sec": float(post_trigger_delay_sec),
         "channels": idle_channels,
         "des_yaw_i16": 0,
     }

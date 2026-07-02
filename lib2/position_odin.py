@@ -16,23 +16,23 @@ ENTRANCE_Y_RED = 0.511
 PRE_ENTRANCE_X_RED = 0.500
 PRE_ENTRANCE_Y_RED = 1.776
 WEAPON_TARGETS_RED = {
-    1: (-1.148, -2.184),
-    2: (-1.140, -1.995),
-    3: (-1.140, -1.179),
-    4: (-1.135, -1.595),
-    5: (-1.143, -1.400),
-    6: (1.723, -1.150),
+    1: (-1.155, -2.451),
+    2: (-1.148, -2.252),
+    3: (-1.153, -2.053),
+    4: (-1.145, -1.852),
+    5: (-1.147, -1.652),
+    6: (1.147, -1.145),
 }
 WEAPON_RETREAT_STOP_Y_RED = -4.00
 
 # 九宫格区域坐标占位（二维坐标，待实测后替换）
-pre_entrance9_red = (0.0, 0.0)
-entrance9_red = (0.0, 0.0)
+pre_entrance9_red = (3.905, 5.203)
+entrance9_red = (3.91, 7.960)
 column1_red = (0.0, 0.0)
-column2_red = (0.0, 0.0)
+column2_red = (-0.801, 7.337)
 column3_red = (0.0, 0.0)
 pre_climb_R2_red = (0.0, 0.0)
-climb_R2_red = (0.0, 0.0)
+climb_R2_red = (0.0, 0.0)   
 pre_R1climb_red = (0.0, 0.0)
 R1climb_red = (0.0, 0.0)
 

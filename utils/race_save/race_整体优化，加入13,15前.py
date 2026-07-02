@@ -25,7 +25,7 @@ def _import_matplotlib():
 # 7. R1，R2都不能碰假的（fake）kfs
 # 8. R2在梅林里上下台阶的时候要保证下一个台阶上无KFS，如果有要抓取，但是只能抓取R2能够抓取的
 # 9. R1的KSF只能由R1自己抓取，如果R1的ksf挡住R2的路，则R1把R1的1kfs拿开让R2前进
-# 10. R2从10号或12号位置出口侧离开，并最终移动到出口辅助点 13/15
+# 10. R2从10号或12号位置出口侧离开；lib2 中真正的出口辅助点是 13/15，这里只规划 1-12
 # 11. R2如果要夹取他旁边的一个kfs但是不去那个台阶，也是可以的，这种情况用蓝线标出
 # 12. 在路径尽可能短的情况下完成路径规划
 # ============================================
@@ -53,7 +53,7 @@ R1_KFS_COUNT, R2_KFS_COUNT, FAKE_KFS_COUNT = COMPETITION_KFS_COUNT_PROFILES[
 ]
 REQUIRED_R2_PICKUP_COUNT = 2
 
-# 路径规划代价配置。KFS 布局只覆盖 1-12 号格；13/15 只作为出口辅助点参与规划。
+# 路径规划代价配置。规划只覆盖 1-12 号格；侧吸和 13/15 出口辅助格不计入。
 PATH_MOVE_COST = 1.0
 PATH_REACH_COST = 0.0
 PATH_ROTATION_COST = 1.0
@@ -130,9 +130,7 @@ POS_TO_COORD_RED = {
     9: (2, 0, 40),
     10: (3, 2, 20),  # 10号出口侧
     11: (3, 1, 40),
-    12: (3, 0, 20),  # 12号出口侧
-    13: (4, 2, 0),   # 10号对应出口辅助点
-    15: (4, 0, 0),   # 12号对应出口辅助点
+    12: (3, 0, 20)   # 12号出口侧
 }
 
 
@@ -150,9 +148,7 @@ POS_TO_COORD_BLUE = {
     9: (2, 2, 40),
     10: (3, 0, 20),  # 10号出口侧
     11: (3, 1, 40),
-    12: (3, 2, 20),  # 12号出口侧
-    13: (4, 0, 0),   # 10号对应出口辅助点
-    15: (4, 2, 0),   # 12号对应出口辅助点
+    12: (3, 2, 20)   # 12号出口侧
 }
 
 
@@ -221,11 +217,10 @@ class _CoordToPosMapping(Mapping):
 pos_to_coord = _FieldMapping()
 coord_to_pos = _CoordToPosMapping()
 
-GRID_X_COUNT = 5
+GRID_X_COUNT = 4
 GRID_Y_COUNT = 3
 ENTRY_POS = 2  # R2从2号位置进入
-EXIT_POSITIONS = [13, 15]  # R2最终移动到13或15出口辅助点
-KFS_POSITIONS = list(range(1, 13))
+EXIT_POSITIONS = [10, 12]  # R2从10号或12号位置出口侧离开
 
 # 内部位置（树林内，R2-KFS和假KFS放置区域）
 INTERIOR_POS = [4, 5, 6, 7, 8, 9]
@@ -413,8 +408,8 @@ def validate_kfs_count_config():
         )
 
     total_count = R1_KFS_COUNT + R2_KFS_COUNT + FAKE_KFS_COUNT
-    if total_count > len(KFS_POSITIONS):
-        return False, f"KFS 总数 {total_count} 超过可放置格子数 {len(KFS_POSITIONS)}"
+    if total_count > len(pos_to_coord):
+        return False, f"KFS 总数 {total_count} 超过场地格子数 {len(pos_to_coord)}"
 
     return True, "KFS 数量配置合法"
 
@@ -432,7 +427,7 @@ def validate_kfs_layout(kfs):
     if not isinstance(kfs, Mapping):
         return False, f"kfs 必须是映射类型，当前为 {type(kfs).__name__}"
 
-    valid_positions = set(KFS_POSITIONS)
+    valid_positions = set(pos_to_coord.keys())
     extra_positions = sorted(position for position in kfs if position not in valid_positions)
     if extra_positions:
         return False, f"KFS 布局包含无效格子编号: {extra_positions}"
@@ -477,10 +472,11 @@ def get_grid_neighbors(pos):
     candidates = []
     for dx, dy in [(1, 0), (0, 1), (0, -1), (-1, 0)]:
         nx, ny = x + dx, y + dy
-        for p, (px, py, ph) in pos_to_coord.items():
-            if px == nx and py == ny:
-                candidates.append(p)
-                break
+        if 0 <= nx < GRID_X_COUNT and 0 <= ny < GRID_Y_COUNT:
+            for p, (px, py, ph) in pos_to_coord.items():
+                if px == nx and py == ny:
+                    candidates.append(p)
+                    break
     return candidates
 
 
@@ -562,7 +558,7 @@ def generate_kfs():
     if not config_valid:
         raise ValueError(config_message)
 
-    kfs = {p: None for p in KFS_POSITIONS}
+    kfs = {p: None for p in range(1, 13)}
 
     if R1_KFS_COUNT > len(R1_ALLOWED_POS):
         raise ValueError(
@@ -980,39 +976,48 @@ def visualize(kfs, path=None):
         return filename
 
     fig, ax = plt.subplots(figsize=(10, 7))
-    ax.set_xlim(-1.3, 5.3)
+    ax.set_xlim(-1.3, 4.3)
     ax.set_ylim(-0.8, 2.8)
     ax.set_aspect('equal')
 
     # 画格子
-    for pos, (x, y, height) in sorted(pos_to_coord.items()):
-        if height == 20:
-            face_color = '#006400'
-        elif height == 40:
-            face_color = '#228B22'
-        elif height == 60:
-            face_color = '#90EE90'
-        else:
-            face_color = 'white'
+    for x in range(GRID_X_COUNT):
+        for y in range(GRID_Y_COUNT):
+            pos = None
+            height = None
+            for p, (px, py, ph) in pos_to_coord.items():
+                if px == x and py == y:
+                    pos = p
+                    height = ph
+                    break
 
-        rect = patches.Rectangle((x - 0.5, y - 0.5), 1, 1,
-                                 linewidth=1.5, edgecolor='black',
-                                 facecolor=face_color)
-        ax.add_patch(rect)
+            if height == 20:
+                face_color = '#006400'
+            elif height == 40:
+                face_color = '#228B22'
+            elif height == 60:
+                face_color = '#90EE90'
+            else:
+                face_color = 'white'
 
-        # 高度标签
-        ax.text(x, y - 0.35, f"h={height}", ha='center', va='center',
-                fontsize=7, color='white', alpha=0.7)
+            rect = patches.Rectangle((x - 0.5, y - 0.5), 1, 1,
+                                     linewidth=1.5, edgecolor='black',
+                                     facecolor=face_color)
+            ax.add_patch(rect)
 
-        # 位置编号 + 入口/出口标记
-        label = f"{pos}"
-        if pos == ENTRY_POS:
-            label = f"{pos}\n(入口)"
-        elif pos in EXIT_POSITIONS:
-            label = f"{pos}\n(出口)"
+            # 高度标签
+            ax.text(x, y - 0.35, f"h={height}", ha='center', va='center',
+                    fontsize=7, color='white', alpha=0.7)
 
-        ax.text(x, y + 0.1, label, ha='center', va='center',
-                fontsize=10, color='white', fontweight='bold')
+            # 位置编号 + 入口/出口标记
+            label = f"{pos}"
+            if pos == ENTRY_POS:
+                label = f"{pos}\n(入口)"
+            elif pos in EXIT_POSITIONS:
+                label = f"{pos}\n(出口)"
+
+            ax.text(x, y + 0.1, label, ha='center', va='center',
+                    fontsize=10, color='white', fontweight='bold')
 
     # 画入口箭头
     ax.annotate('', xy=(-0.55, 1), xytext=(-1.05, 1),
@@ -1121,11 +1126,11 @@ def visualize(kfs, path=None):
 
     reach_count = len(get_reach_actions(path)) if path else 0
     ax.set_title("崇武探幽 - R2最短路径规划\n"
-                 f"（从位置2进入，抓取{REQUIRED_R2_PICKUP_COUNT}个R2-KFS，从13/15出口离开）\n"
+                 f"（从位置2进入，抓取{REQUIRED_R2_PICKUP_COUNT}个R2-KFS，从10/12出口侧离开）\n"
                  f"白色线=移动  蓝色虚线=夹取(共{reach_count}次)",
                  fontsize=13, pad=15)
-    ax.set_xticks([0, 1, 2, 3, 4])
-    ax.set_xticklabels(['x0', 'x1', 'x2', 'x3', 'x4'], fontsize=11)
+    ax.set_xticks([0, 1, 2, 3])
+    ax.set_xticklabels(['x0', 'x1', 'x2', 'x3'], fontsize=11)
     ax.set_yticks([0, 1, 2])
     ax.set_yticklabels(['-90deg', 'center', '+90deg'], fontsize=11)
     ax.grid(True, linestyle=':', alpha=0.3)
@@ -1717,7 +1722,7 @@ def prompt_kfs_count_config():
 
 def print_kfs_layout(kfs):
     print("\n【KFS放置】")
-    for pos in KFS_POSITIONS:
+    for pos in range(1, 13):
         typ = kfs[pos]
         if typ is not None:
             x, y, h = pos_to_coord[pos]
@@ -1767,104 +1772,6 @@ def print_plan_result(kfs, path):
         print(f"  {action}")
 
 
-def plan_path_with_pre_entry_processing(qr_string):
-    """
-    按 challenge_lib 的入口前三位逻辑预处理后再调用路径规划。
-
-    - 前三位没有 2：直接用原始布局规划。
-    - 第二位是 2：优先预吸取 2 号位。
-    - 否则在 1/3 号位中选择一个预吸取；两者都有时选规划代价更低者。
-    - 发生预吸取时，R2 总数和需要抓取 R2 数量都减 1，再对修改后的布局规划。
-    """
-    data = "" if qr_string is None else str(qr_string).strip()
-    original_kfs = qr_to_kfs(data)
-    layout_valid, layout_message = validate_kfs_layout(original_kfs)
-    if not layout_valid:
-        raise ValueError(layout_message)
-
-    pre_entry_r2_positions = [
-        position
-        for position, value in enumerate(data[:3], start=1)
-        if value == "2"
-    ]
-    if not pre_entry_r2_positions:
-        return {
-            "pre_entry_pickup": False,
-            "pickup_position": None,
-            "original_kfs": original_kfs,
-            "effective_kfs": original_kfs,
-            "path": plan_path(original_kfs),
-            "planning_cost": None,
-        }
-
-    global R2_KFS_COUNT
-    global REQUIRED_R2_PICKUP_COUNT
-
-    original_r2_count = R2_KFS_COUNT
-    original_required_count = REQUIRED_R2_PICKUP_COUNT
-    if original_r2_count <= 0:
-        raise ValueError("R2_KFS_COUNT 必须大于 0 才能执行入口预吸取")
-    if original_required_count <= 0:
-        raise ValueError("REQUIRED_R2_PICKUP_COUNT 必须大于 0 才能执行入口预吸取")
-
-    R2_KFS_COUNT = original_r2_count - 1
-    REQUIRED_R2_PICKUP_COUNT = original_required_count - 1
-
-    try:
-        candidate_positions = (
-            [2]
-            if 2 in pre_entry_r2_positions
-            else list(pre_entry_r2_positions)
-        )
-        candidate_results = []
-        candidate_errors = []
-
-        for pickup_position in candidate_positions:
-            modified_chars = list(data)
-            modified_chars[pickup_position - 1] = "0"
-            modified_data = "".join(modified_chars)
-            try:
-                effective_kfs = qr_to_kfs(modified_data)
-                layout_valid, layout_message = validate_kfs_layout(effective_kfs)
-                if not layout_valid:
-                    raise ValueError(layout_message)
-                path = plan_path(effective_kfs)
-                if not path:
-                    raise ValueError("当前 KFS 布局下未找到可行路径")
-                planning_cost = float(calculate_path_cost(effective_kfs, path))
-            except ValueError as exc:
-                candidate_errors.append((pickup_position, str(exc)))
-                continue
-
-            candidate_results.append({
-                "pre_entry_pickup": True,
-                "pickup_position": int(pickup_position),
-                "original_kfs": original_kfs,
-                "effective_kfs": effective_kfs,
-                "path": path,
-                "planning_cost": planning_cost,
-            })
-
-        if not candidate_results:
-            error_text = "; ".join(
-                f"{position}号格: {message}"
-                for position, message in candidate_errors
-            )
-            raise ValueError(
-                "前三位 R2-KFS 入口预吸取后均无可行路径"
-                + (f": {error_text}" if error_text else "")
-            )
-
-        return min(
-            candidate_results,
-            key=lambda result: result["planning_cost"],
-        )
-    except Exception:
-        R2_KFS_COUNT = original_r2_count
-        REQUIRED_R2_PICKUP_COUNT = original_required_count
-        raise
-
-
 def run_manual_qr_planning():
     """模式4：手动输入 12 位字符并执行路径规划。"""
     print("=" * 60)
@@ -1876,29 +1783,19 @@ def run_manual_qr_planning():
     while True:
         qr_string = input("请输入符合当前数量配置的12位字符：").strip()
         try:
-            plan_result = plan_path_with_pre_entry_processing(qr_string)
+            kfs = qr_to_kfs(qr_string)
         except ValueError as exc:
-            print(f"输入或规划错误：{exc}")
+            print(f"输入错误：{exc}")
+            continue
+
+        layout_valid, layout_message = validate_kfs_layout(kfs)
+        if not layout_valid:
+            print(f"布局错误：{layout_message}")
             continue
         break
 
-    original_kfs = plan_result["original_kfs"]
-    kfs = plan_result["effective_kfs"]
-    path = plan_result["path"]
-
-    print_kfs_layout(original_kfs)
-    if plan_result["pre_entry_pickup"]:
-        print(
-            "\n【入口前三位预处理】"
-            f"\n  预吸取位置: {plan_result['pickup_position']}"
-            f"\n  预处理后数量配置: R2={R2_KFS_COUNT}, "
-            f"需要抓取R2={REQUIRED_R2_PICKUP_COUNT}"
-        )
-        print("\n【预处理后KFS放置】")
-        print_kfs_layout(kfs)
-    else:
-        print("\n【入口前三位预处理】无")
-
+    print_kfs_layout(kfs)
+    path = plan_path(kfs)
     print_plan_result(kfs, path)
     if path:
         print("\n正在生成可视化图表...")

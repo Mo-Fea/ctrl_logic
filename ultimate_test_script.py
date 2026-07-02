@@ -242,6 +242,7 @@ def print_main_menu():
     print("请输入你想要进行的测试类型：")
     print("1.简单动作测试（只需要操控单个部件，或者移动，旋转测试）")
     print("2.复杂动作测试（多个部件联动，或者区域流程，或者完整流程）")
+    print("3.恢复至初态")
 
 
 def select_field_type():
@@ -496,10 +497,10 @@ def run_sucker_suction_test(context):
 def run_kfs_pose_test(context):
     print("---------------------------------------------------------------------------------------------")
     print("开始机械臂姿态测试")
-    print("0原态，1高位吸取，2低位吸取，3.过渡态，4.放置态，5.侧吸态")
+    print("0原态，1高位吸取，2低位吸取，3.过渡态，4.放置态，5.侧吸态，6.第三层KFS姿态")
 
     pose_id = read_choice(
-        {"0", "1", "2", "3", "4", "5"},
+        {"0", "1", "2", "3", "4", "5", "6"},
         prompt="请输入目标姿态：",
     )
     pose_name = {
@@ -509,6 +510,7 @@ def run_kfs_pose_test(context):
         "3": "过渡态",
         "4": "放置态",
         "5": "侧吸态",
+        "6": "第三层KFS姿态",
     }[pose_id]
 
     print(f"目标姿态（{pose_id}，{pose_name}）")
@@ -520,6 +522,7 @@ def run_kfs_pose_test(context):
         "3": kfs.kfs_transition_pose,
         "4": kfs.place_kfs_pose,
         "5": kfs.kfs_side_pose,
+        "6": kfs.place_3rd_kfs_pose,
     }
     result = pose_actions[pose_id](context.sender)
     print("机械臂姿态测试执行结果：")
@@ -619,6 +622,58 @@ def run_wheel_lock_test(context):
         "action_name": action_name,
         "result": result,
     }
+
+
+def run_restore_initial_state(context):
+    global current_stair_id
+
+    print("---------------------------------------------------------------------------------------------")
+    print("恢复至初态")
+    confirm = read_choice(
+        {"0", "1"},
+        prompt="确认恢复（0返回，1确认）：",
+    )
+    if confirm == "0":
+        print("已取消恢复，返回上一级")
+        return {
+            "completed": False,
+            "cancelled": True,
+        }
+
+    previous_current_stair_id = current_stair_id
+    previous_suck_count = int(kfs.suck_count)
+
+    unlock_result = move.unlock_wheel(context.sender)
+    weapon_loose_result = weapon.weapon_loose(context.sender)
+    weapon_down_result = weapon.weapon_down(context.sender)
+
+    kfs.suck_count = 1
+    sucker_rotation_result = kfs.sucker_0deg(context.sender)
+    cylinder_selection_result = kfs.sucker_select_both(context.sender)
+    suction_off_result = module.set_kfs_suction(
+        sender=context.sender,
+        suction_on=False,
+        pose_id=0,
+    )
+
+    current_stair_id = 0
+    result = {
+        "completed": True,
+        "cancelled": False,
+        "previous_current_stair_id": previous_current_stair_id,
+        "current_stair_id": current_stair_id,
+        "previous_suck_count": previous_suck_count,
+        "suck_count": int(kfs.suck_count),
+        "unlock_result": unlock_result,
+        "weapon_loose_result": weapon_loose_result,
+        "weapon_down_result": weapon_down_result,
+        "sucker_rotation_result": sucker_rotation_result,
+        "cylinder_selection_result": cylinder_selection_result,
+        "suction_off_result": suction_off_result,
+    }
+    print("恢复至初态执行结果：")
+    print(result)
+    return result
 
 
 def run_simple_action_menu(context):
@@ -929,15 +984,6 @@ def run_complete_meilin_test(context):
     global current_stair_id
 
     print("---------------------------------------------------------------------------------------------")
-    if int(current_stair_id) != -1:
-        print("位置错误，请先做梅林动作准备")
-        return {
-            "completed": False,
-            "executed": False,
-            "reason": "current_stair_is_not_minus_one",
-            "current_stair_id": int(current_stair_id),
-        }
-
     print("完整梅林测试")
     competition_mode = int(read_choice(
         {"1", "2"},
@@ -979,6 +1025,22 @@ def run_complete_meilin_test(context):
             action_matrix = action_matrix_queue.get()
             print("完整动作矩阵：")
             print(action_matrix)
+            print("二维码识别完成，先打开 weapon 夹爪并等待 5s")
+            weapon_loose_result = weapon.weapon_loose(context.sender)
+            print("weapon 夹爪打开结果：")
+            print(weapon_loose_result)
+            time.sleep(5.0)
+            if not weapon_loose_result.get("completed", False):
+                return {
+                    "completed": False,
+                    "executed": False,
+                    "reason": "weapon_loose_failed",
+                    "competition_result": competition_result,
+                    "action_matrix": action_matrix,
+                    "weapon_loose_result": weapon_loose_result,
+                    "current_stair_id": int(current_stair_id),
+                }
+
             matrix_result = module.execute_action_matrix(
                 sender=context.sender,
                 position_runtime=context.position_runtime,
@@ -996,6 +1058,7 @@ def run_complete_meilin_test(context):
             "executed": True,
             "competition_result": competition_result,
             "action_matrix": action_matrix,
+            "weapon_loose_result": weapon_loose_result,
             "matrix_result": matrix_result,
             "current_stair_id": int(current_stair_id),
         }
@@ -1067,9 +1130,10 @@ def run_place_second_level_box_test(context):
             "release_pose_result": release_pose_result,
         }
 
-    target_x = -0.950
-    target_y = -4.46
+    raw_target_x = -0.950
+    raw_target_y = -4.46
     target_yaw_deg = 180.0
+    target_x, target_y = tools.deg180_correction(raw_target_x, raw_target_y)
     move_result = module.move_to_des(
         sender=context.sender,
         position_runtime=context.position_runtime,
@@ -1089,9 +1153,12 @@ def run_place_second_level_box_test(context):
             "place_pose_result": place_pose_result,
             "release_pose_result": release_pose_result,
             "move_target": {
+                "raw_x": raw_target_x,
+                "raw_y": raw_target_y,
                 "x": target_x,
                 "y": target_y,
                 "yaw_deg": target_yaw_deg,
+                "correction_yaw_deg": 180.0,
             },
             "move_result": move_result,
         }
@@ -1105,9 +1172,12 @@ def run_place_second_level_box_test(context):
         "place_pose_result": place_pose_result,
         "release_pose_result": release_pose_result,
         "move_target": {
+            "raw_x": raw_target_x,
+            "raw_y": raw_target_y,
             "x": target_x,
             "y": target_y,
             "yaw_deg": target_yaw_deg,
+            "correction_yaw_deg": 180.0,
         },
         "move_result": move_result,
         "release_result": release_result,
@@ -1273,11 +1343,13 @@ def main():
 
         while True:
             print_main_menu()
-            choice = read_choice({"1", "2"})
+            choice = read_choice({"1", "2", "3"})
             if choice == "1":
                 run_simple_action_menu(context)
             elif choice == "2":
                 run_complex_action_menu(context)
+            elif choice == "3":
+                run_restore_initial_state(context)
     finally:
         cleanup_runtime(context)
 
