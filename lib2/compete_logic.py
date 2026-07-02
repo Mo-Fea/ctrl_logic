@@ -9,6 +9,28 @@ from utils import challenge_lib
 from utils import race
 
 
+ACTION_MATRIX_QUEUE = queue.Queue()
+
+
+def clear_action_matrix_queue(action_matrix_queue=None):
+    action_matrix_queue = (
+        ACTION_MATRIX_QUEUE if action_matrix_queue is None else action_matrix_queue
+    )
+    while True:
+        try:
+            action_matrix_queue.get_nowait()
+        except queue.Empty:
+            break
+    return action_matrix_queue
+
+
+def _peek_queue(action_matrix_queue):
+    with action_matrix_queue.mutex:
+        if not action_matrix_queue.queue:
+            return None
+        return action_matrix_queue.queue[0]
+
+
 def _wait_until_lock_held(lock, timeout_sec=1.0, poll_interval_sec=0.01):
     deadline = time.time() + float(timeout_sec)
     while time.time() < deadline:
@@ -33,7 +55,7 @@ def rigion_2_retry_plan(
 
     向 queue 推入 action_matrix，行为与后台 QR 线程 put_action_matrix_only=True 一致。
     """
-    result_queue = result_queue if result_queue is not None else queue.Queue()
+    result_queue = result_queue if result_queue is not None else ACTION_MATRIX_QUEUE
 
     try:
         r1_count = int(r1_count)
@@ -107,6 +129,8 @@ def rigion_3_execute_strategy(
     position_runtime,
     odom_runtime,
     final_strategy=1,
+    run_sucker_release_pose=True,
+    run_preparation_pose=True,
 ):
     """
     区域 3 策略流程：不执行 enter_battlefield，只执行最终胜利策略。
@@ -118,27 +142,45 @@ def rigion_3_execute_strategy(
     if final_strategy not in (1, 2):
         raise ValueError(f"final_strategy must be 1 or 2, got {final_strategy}")
 
-    sucker_release_pose_result = kfs.sucker_release_pose(sender)
-    if not sucker_release_pose_result.get("completed", False):
-        return {
-            "completed": False,
-            "failed_step": "sucker_release_pose",
-            "final_strategy": int(final_strategy),
-            "strategy_name": None,
-            "sucker_release_pose_result": sucker_release_pose_result,
-            "preparation_pose_name": None,
-            "preparation_pose_result": None,
-            "strategy_result": None,
+    if run_sucker_release_pose:
+        sucker_release_pose_result = kfs.sucker_release_pose(sender)
+        if not sucker_release_pose_result.get("completed", False):
+            return {
+                "completed": False,
+                "failed_step": "sucker_release_pose",
+                "final_strategy": int(final_strategy),
+                "strategy_name": None,
+                "sucker_release_pose_result": sucker_release_pose_result,
+                "preparation_pose_name": None,
+                "preparation_pose_result": None,
+                "strategy_result": None,
+            }
+    else:
+        sucker_release_pose_result = {
+            "completed": True,
+            "skipped": True,
         }
 
     if final_strategy == 1:
         preparation_pose_name = "place_3rd_kfs_pose"
         strategy_name = "high_score190"
-        preparation_pose_result = kfs.place_3rd_kfs_pose(sender)
+        if run_preparation_pose:
+            preparation_pose_result = kfs.place_3rd_kfs_pose(sender)
+        else:
+            preparation_pose_result = {
+                "completed": True,
+                "skipped": True,
+            }
     else:
         preparation_pose_name = "place_kfs_pose"
         strategy_name = "totally_win"
-        preparation_pose_result = kfs.place_kfs_pose(sender)
+        if run_preparation_pose:
+            preparation_pose_result = kfs.place_kfs_pose(sender)
+        else:
+            preparation_pose_result = {
+                "completed": True,
+                "skipped": True,
+            }
 
     if not preparation_pose_result.get("completed", False):
         return {
@@ -181,7 +223,7 @@ def rigion_2(
     sender,
     position_runtime,
     odom_runtime,
-    action_matrix_queue,
+    action_matrix_queue=None,
     queue_timeout_sec=None,
     final_direction=None,
     execute_action_matrix_kwargs=None,
@@ -189,6 +231,9 @@ def rigion_2(
     """
     区域 2 流程：从 queue 获取动作矩阵并执行完整梅林动作矩阵。
     """
+    action_matrix_queue = (
+        ACTION_MATRIX_QUEUE if action_matrix_queue is None else action_matrix_queue
+    )
     execute_action_matrix_kwargs = (
         {}
         if execute_action_matrix_kwargs is None
@@ -205,6 +250,7 @@ def rigion_2(
             "completed": False,
             "failed_step": "action_matrix_queue_empty",
             "action_matrix": None,
+            "action_matrix_queue": action_matrix_queue,
             "matrix_result": None,
         }
 
@@ -221,6 +267,7 @@ def rigion_2(
         "completed": bool(matrix_result.get("completed", False)),
         "failed_step": matrix_result.get("failure_reason"),
         "action_matrix": action_matrix,
+        "action_matrix_queue": action_matrix_queue,
         "matrix_result": matrix_result,
     }
 
@@ -240,6 +287,7 @@ def rigion_1(
     unlock_wheel_kwargs=None,
     weapon_loose_kwargs=None,
     final_wait_sec=5.0,
+    action_matrix_queue=None,
 ):
     """
     区域 1 流程：后台识别 QR，同时抓取 weapon，等待 QR 线程释放锁后进入后续动作。
@@ -263,7 +311,10 @@ def rigion_1(
         {} if weapon_loose_kwargs is None else dict(weapon_loose_kwargs)
     )
 
-    action_matrix_queue = queue.Queue()
+    action_matrix_queue = (
+        ACTION_MATRIX_QUEUE if action_matrix_queue is None else action_matrix_queue
+    )
+    clear_action_matrix_queue(action_matrix_queue)
     scanner = challenge_lib.start_background_qr_scanner(
         result_queue=action_matrix_queue,
         stable_frame_count=stable_frame_count,
@@ -287,6 +338,7 @@ def rigion_1(
             "scanner_error": scanner.last_error,
             "scanner_lock_started": False,
             "action_matrix": None,
+            "action_matrix_queue": action_matrix_queue,
         }
 
     fetch_result = None
@@ -317,6 +369,7 @@ def rigion_1(
                 "lock_result": lock_result,
                 "qr_wait_result": qr_wait_result,
                 "action_matrix": action_matrix,
+                "action_matrix_queue": action_matrix_queue,
             }
 
         lock_result = move.lock_wheel(sender, **lock_wheel_kwargs)
@@ -331,6 +384,7 @@ def rigion_1(
                 "lock_result": lock_result,
                 "qr_wait_result": qr_wait_result,
                 "action_matrix": action_matrix,
+                "action_matrix_queue": action_matrix_queue,
             }
 
         qr_wait_result = challenge_lib.wait_until_scanner_released(
@@ -348,10 +402,10 @@ def rigion_1(
                 "qr_wait_result": qr_wait_result,
                 "scanner_error": scanner.last_error,
                 "action_matrix": action_matrix,
+                "action_matrix_queue": action_matrix_queue,
             }
 
-        if not action_matrix_queue.empty():
-            action_matrix = action_matrix_queue.get()
+        action_matrix = _peek_queue(action_matrix_queue)
 
         unlock_result = move.unlock_wheel(sender, **unlock_wheel_kwargs)
         if not unlock_result.get("completed", False):
@@ -365,6 +419,7 @@ def rigion_1(
                 "lock_result": lock_result,
                 "qr_wait_result": qr_wait_result,
                 "action_matrix": action_matrix,
+                "action_matrix_queue": action_matrix_queue,
                 "unlock_result": unlock_result,
             }
 
@@ -383,6 +438,7 @@ def rigion_1(
                 "lock_result": lock_result,
                 "qr_wait_result": qr_wait_result,
                 "action_matrix": action_matrix,
+                "action_matrix_queue": action_matrix_queue,
                 "unlock_result": unlock_result,
                 "weapon_loose_result": weapon_loose_result,
             }
@@ -401,6 +457,7 @@ def rigion_1(
             "qr_wait_result": qr_wait_result,
             "scanner_error": scanner.last_error,
             "action_matrix": action_matrix,
+            "action_matrix_queue": action_matrix_queue,
             "unlock_result": unlock_result,
             "weapon_loose_result": weapon_loose_result,
             "final_wait_sec": float(final_wait_sec),
