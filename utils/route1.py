@@ -7,11 +7,11 @@ except ImportError:
 def main():
     print("====================================")
     print("机器人R2路径规划系统已就绪（challenge/race）")
-    print("请将二维码对准摄像头，连续5帧稳定识别后自动规划；按 'q' 退出")
+    print("请将二维码对准摄像头，连续2帧稳定识别后自动规划；按 'q' 退出")
     print("====================================")
 
     scanner = challenge_lib.start_background_qr_scanner(
-        stable_frame_count=5,
+        stable_frame_count=2,
         show_window=True,
         stop_after_success=True,
     )

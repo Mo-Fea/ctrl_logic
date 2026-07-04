@@ -177,7 +177,9 @@ def kfs_suck_preparation(
     sender,
     count,
     edge_arm_sec=0.1,
-    edge_hold_sec=0.1,
+    edge_hold_sec=0.5,
+    mode_settle_sec=0.3,
+    suction_off_sec=0.3,
     loop_interval_sec=0.02,
 ):
     """
@@ -185,7 +187,7 @@ def kfs_suck_preparation(
 
     count=0: 不执行动作，直接返回。
     count=1: 选择第一个气缸 PF2，触发 ch4:1->3，suck_count += 1。
-    count=2: 选择双气缸 PF2/PF3，触发 ch4:1->3，suck_count += 2。
+    count=2: 选择双气缸 PF2/PF3，触发 ch4:1->3，suck_count 置为 3。
     """
     global suck_count
 
@@ -217,15 +219,60 @@ def kfs_suck_preparation(
     else:
         cylinder_selection_result = sucker_select_both(sender)
 
-    suction_result = _release_kfs_suction_with_lock(
-        sender=sender,
-        edge_arm_sec=edge_arm_sec,
-        edge_hold_sec=edge_hold_sec,
-        loop_interval_sec=loop_interval_sec,
-        keep_suction_on=True,
-    )
+    with tools.AUTO_TRIGGER_LOCK:
+        mode_settle_channels = _repeat_set_channel_values(
+            sender,
+            {
+                KFS_MODE_CHANNEL_INDEX: KFS_MODE_VALUE,
+            },
+            mode_settle_sec,
+            loop_interval_sec=loop_interval_sec,
+        )
+        arm_channels = _repeat_set_channel_values(
+            sender,
+            {
+                KFS_SUCTION_CHANNEL_INDEX: KFS_SUCTION_OFF_VALUE,
+                KFS_MODE_CHANNEL_INDEX: KFS_MODE_VALUE,
+            },
+            suction_off_sec,
+            loop_interval_sec=loop_interval_sec,
+        )
+        fire_channels = _repeat_set_channel_values(
+            sender,
+            {
+                KFS_SUCTION_CHANNEL_INDEX: KFS_SUCTION_ON_VALUE,
+                KFS_MODE_CHANNEL_INDEX: KFS_MODE_VALUE,
+            },
+            edge_hold_sec,
+            loop_interval_sec=loop_interval_sec,
+        )
+        idle_channel_values = {
+            KFS_SUCTION_CHANNEL_INDEX: KFS_SUCTION_ON_VALUE,
+            KFS_MODE_CHANNEL_INDEX: tools.SAFE_SWITCH_VALUE,
+            KFS_POSE_CHANNEL_INDEX: tools.SAFE_SWITCH_VALUE,
+            KFS_TRIGGER_CHANNEL_INDEX: tools.SAFE_SWITCH_VALUE,
+        }
+        idle_channels = move_lib.set_channel_values(
+            sender,
+            channel_values=idle_channel_values,
+        )
+    suction_result = {
+        "suction_on": True,
+        "mode_settle_channels": mode_settle_channels,
+        "arm_channels": arm_channels,
+        "fire_channels": fire_channels,
+        "idle_channels": idle_channels,
+        "mode_settle_sec": float(mode_settle_sec),
+        "suction_off_sec": float(suction_off_sec),
+        "edge_arm_sec": float(edge_arm_sec),
+        "edge_hold_sec": float(edge_hold_sec),
+        "completed": True,
+    }
     if suction_result.get("completed", False):
-        suck_count += count
+        if count == 2:
+            suck_count = 3
+        else:
+            suck_count += count
 
     return {
         "completed": bool(suction_result.get("completed", False)),
@@ -543,11 +590,11 @@ def sucker_release_pose(sender):
 def place_3rd_kfs(
     sender,
     position_runtime,
-    jdg_range=0.04,
+    jdg_range=0.015,
     loop_interval_sec=0.02,
     confirm_frame_count=5,
     timeout_enabled=True,
-    timeout_sec=30.0,
+    timeout_sec=999.0,
 ):
     """
     通过机器人 Z 坐标下降量判断第三个 KFS 的释放时机。
@@ -555,7 +602,7 @@ def place_3rd_kfs(
     持续记录观测到的最大 Z；当 max_z - current_z >= jdg_range
     连续满足 confirm_frame_count 个真实更新帧时，调用 release_kfs(sender)
     释放并退出。
-    timeout_enabled=True 时，超过 timeout_sec 未满足条件则返回失败，默认 30s。
+    timeout_enabled=True 时，超过 timeout_sec 未满足条件则返回失败，默认 999s。
     timeout_enabled=False 时不做超时退出。
     """
     jdg_range = float(jdg_range)

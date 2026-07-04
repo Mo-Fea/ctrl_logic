@@ -61,9 +61,75 @@ STAIR_HEIGHT_BY_ID_BLUE = {
 # 兼容旧代码的红场高度表别名；内部逻辑使用 get_stair_height_by_id()。
 STAIR_HEIGHT_BY_ID = STAIR_HEIGHT_BY_ID_RED
 
+STAIR_MATRIX_ANGLE_SUFFIX_BY_DEG = {
+    0.01: "0",
+    90: "90",
+    -90: "neg90",
+    180: "180",
+}
+
 
 def get_position_lib():
     return position_lib
+
+
+def _normalize_stair_matrix_angle(angle_deg):
+    if isinstance(angle_deg, str):
+        angle_key = angle_deg.strip().lower().replace("-", "neg")
+        angle_aliases = {
+            "0": 0.01,
+            "0.0": 0.01,
+            "0.01": 0.01,
+            "90": 90,
+            "90.0": 90,
+            "neg90": -90,
+            "neg90.0": -90,
+            "negative90": -90,
+            "-90": -90,
+            "-90.0": -90,
+            "180": 180,
+            "180.0": 180,
+        }
+        if angle_key in angle_aliases:
+            return angle_aliases[angle_key]
+    else:
+        angle_float = float(angle_deg)
+        if abs(angle_float) < 1e-6:
+            return 0.01
+        for supported_angle in STAIR_MATRIX_ANGLE_SUFFIX_BY_DEG:
+            if abs(angle_float - float(supported_angle)) < 1e-6:
+                return supported_angle
+
+    raise ValueError("angle_deg must be one of 0.01, 90, -90, 180")
+
+
+def _get_stair_matrix_angle_suffix(angle_deg):
+    return STAIR_MATRIX_ANGLE_SUFFIX_BY_DEG[_normalize_stair_matrix_angle(angle_deg)]
+
+
+def _get_field_name(is_blue_field=None):
+    if is_blue_field is None:
+        is_blue_field = position_backend.is_blue_field()
+    return "blue" if is_blue_field else "red"
+
+
+def _get_position_lib_float_attr(name, default_value):
+    return float(getattr(position_lib, name, default_value))
+
+
+def _get_angle_entrance_value(axis, angle_deg, is_blue_field=None):
+    suffix = _get_stair_matrix_angle_suffix(angle_deg)
+    field_name = _get_field_name(is_blue_field=is_blue_field)
+    lower_name = f"entrance_{axis}{suffix}_{field_name}"
+    upper_name = f"ENTRANCE_{axis.upper()}{suffix}_{field_name.upper()}"
+    default_name = f"ENTRANCE_{axis.upper()}_{field_name.upper()}"
+    module_default = ENTRANCE_X if axis == "x" else ENTRANCE_Y
+
+    if hasattr(position_lib, lower_name):
+        return _get_position_lib_float_attr(lower_name, module_default)
+    if hasattr(position_lib, upper_name):
+        return _get_position_lib_float_attr(upper_name, module_default)
+    return _get_position_lib_float_attr(default_name, module_default)
 
 
 def get_entrance_x():
@@ -78,6 +144,46 @@ def get_entrance_y():
     if getter is not None:
         return float(getter())
     return float(getattr(position_lib, "ENTRANCE_Y", ENTRANCE_Y))
+
+
+def get_entrance_x_for_angle(angle_deg):
+    return _get_angle_entrance_value("x", angle_deg)
+
+
+def get_entrance_y_for_angle(angle_deg):
+    return _get_angle_entrance_value("y", angle_deg)
+
+
+def get_entrance_x0():
+    return get_entrance_x_for_angle(0.01)
+
+
+def get_entrance_y0():
+    return get_entrance_y_for_angle(0.01)
+
+
+def get_entrance_x90():
+    return get_entrance_x_for_angle(90)
+
+
+def get_entrance_y90():
+    return get_entrance_y_for_angle(90)
+
+
+def get_entrance_xneg90():
+    return get_entrance_x_for_angle(-90)
+
+
+def get_entrance_yneg90():
+    return get_entrance_y_for_angle(-90)
+
+
+def get_entrance_x180():
+    return get_entrance_x_for_angle(180)
+
+
+def get_entrance_y180():
+    return get_entrance_y_for_angle(180)
 
 
 def get_pre_entrance_x():
@@ -134,23 +240,16 @@ def _find_neighbor_id(rows, expected_x, expected_y, tolerance):
 
 def _fill_stair_relation_columns(rows, side, is_blue_field=False):
     """
-    按当前红/蓝半场方向语义填充矩阵第 1/2/3 列。
+    按统一方向语义填充矩阵第 1/2/3 列。
     第 4 方向仍由 get_stair_height_relation(...) 按坐标反查。
     """
     side = float(side)
     tolerance = side * 0.2
-    if is_blue_field:
-        direction_to_delta = {
-            1: (0.0, -side),
-            2: (side, 0.0),
-            3: (-side, 0.0),
-        }
-    else:
-        direction_to_delta = {
-            1: (0.0, side),
-            2: (-side, 0.0),
-            3: (side, 0.0),
-        }
+    direction_to_delta = {
+        1: (0.0, side),
+        2: (-side, 0.0),
+        3: (side, 0.0),
+    }
 
     filled_rows = []
     for row in rows:
@@ -202,20 +301,20 @@ def build_stair_height_relation_matrix_red(entrance_x, entrance_y, side):
 def build_stair_height_relation_matrix_blue(entrance_x, entrance_y, side):
     rows = [
         [-1, 0, 0, 0, entrance_x, entrance_y - side],
-        [1, 0, 0, 0, entrance_x + side, entrance_y],
-        [2, 0, 0, 0, entrance_x, entrance_y],
         [3, 0, 0, 0, entrance_x - side, entrance_y],
-        [4, 0, 0, 0, entrance_x + side, entrance_y + side],
-        [5, 0, 0, 0, entrance_x, entrance_y + side],
+        [2, 0, 0, 0, entrance_x, entrance_y],
+        [1, 0, 0, 0, entrance_x + side, entrance_y],
         [6, 0, 0, 0, entrance_x - side, entrance_y + side],
-        [7, 0, 0, 0, entrance_x + side, entrance_y + 2 * side],
-        [8, 0, 0, 0, entrance_x, entrance_y + 2 * side],
+        [5, 0, 0, 0, entrance_x, entrance_y + side],
+        [4, 0, 0, 0, entrance_x + side, entrance_y + side],
         [9, 0, 0, 0, entrance_x - side, entrance_y + 2 * side],
-        [10, 0, 0, 0, entrance_x + side, entrance_y + 3 * side],
-        [11, 0, 0, 0, entrance_x, entrance_y + 3 * side],
+        [8, 0, 0, 0, entrance_x, entrance_y + 2 * side],
+        [7, 0, 0, 0, entrance_x + side, entrance_y + 2 * side],
         [12, 0, 0, 0, entrance_x - side, entrance_y + 3 * side],
-        [13, 0, 0, 0, entrance_x + side, entrance_y + 4 * side],
+        [11, 0, 0, 0, entrance_x, entrance_y + 3 * side],
+        [10, 0, 0, 0, entrance_x + side, entrance_y + 3 * side],
         [15, 0, 0, 0, entrance_x - side, entrance_y + 4 * side],
+        [13, 0, 0, 0, entrance_x + side, entrance_y + 4 * side],
     ]
     return _fill_stair_relation_columns(rows, side, is_blue_field=True)
 
@@ -227,23 +326,77 @@ def build_stair_height_relation_matrix():
     每行格式:
     [阶梯编号, direction1关系, direction2关系, direction3关系, map_x, map_y]
     关系值: 0=该方向没有衔接台阶, 1=该方向台阶比当前台阶高, 2=该方向台阶比当前台阶低。
-    当前方向语义由红/蓝半场决定，详见 tools.direction_int_to_yaw_deg()
-    和 tools.stair_id_to_direction()。
+    方向语义统一按 red 逻辑解释；蓝半场只在矩阵编号上做左右对换。
     """
-    entrance_x = get_entrance_x()
-    entrance_y = get_entrance_y()
+    entrance_x = get_entrance_x_for_angle(0.01)
+    entrance_y = get_entrance_y_for_angle(0.01)
     side = get_stair_side_length()
     if position_backend.is_blue_field():
         return build_stair_height_relation_matrix_blue(entrance_x, entrance_y, side)
     return build_stair_height_relation_matrix_red(entrance_x, entrance_y, side)
 
 
+def build_stair_height_relation_matrix_for_angle(angle_deg):
+    """
+    按指定梅林初始角度的入口坐标生成完整台阶关系矩阵。
+
+    支持 angle_deg: 0.01, 90, -90, 180。
+    """
+    entrance_x = get_entrance_x_for_angle(angle_deg)
+    entrance_y = get_entrance_y_for_angle(angle_deg)
+    side = get_stair_side_length()
+    if position_backend.is_blue_field():
+        return build_stair_height_relation_matrix_blue(entrance_x, entrance_y, side)
+    return build_stair_height_relation_matrix_red(entrance_x, entrance_y, side)
+
+
+def build_stair_height_relation_matrix0():
+    return build_stair_height_relation_matrix_for_angle(0.01)
+
+
+def build_stair_height_relation_matrix90():
+    return build_stair_height_relation_matrix_for_angle(90)
+
+
+def build_stair_height_relation_matrixneg90():
+    return build_stair_height_relation_matrix_for_angle(-90)
+
+
+def build_stair_height_relation_matrix180():
+    return build_stair_height_relation_matrix_for_angle(180)
+
+
 def get_stair_matrix():
-    return build_stair_height_relation_matrix()
+    return build_stair_height_relation_matrix0()
 
 
-# 兼容旧代码的初始快照；主流程应调用 get_stair_matrix() 获取当前雷达后端矩阵。
+def get_stair_matrix_for_angle(angle_deg):
+    normalized_angle = _normalize_stair_matrix_angle(angle_deg)
+    return build_stair_height_relation_matrix_for_angle(normalized_angle)
+
+
+def get_stair_matrix0():
+    return get_stair_matrix_for_angle(0.01)
+
+
+def get_stair_matrix90():
+    return get_stair_matrix_for_angle(90)
+
+
+def get_stair_matrixneg90():
+    return get_stair_matrix_for_angle(-90)
+
+
+def get_stair_matrix180():
+    return get_stair_matrix_for_angle(180)
+
+
+# 兼容旧代码的初始快照；主流程应调用 get_stair_matrix*() 获取当前半场矩阵。
 STAIR_HEIGHT_RELATION_MATRIX = build_stair_height_relation_matrix()
+STAIR_HEIGHT_RELATION_MATRIX0 = build_stair_height_relation_matrix0()
+STAIR_HEIGHT_RELATION_MATRIX90 = build_stair_height_relation_matrix90()
+STAIR_HEIGHT_RELATION_MATRIXNEG90 = build_stair_height_relation_matrixneg90()
+STAIR_HEIGHT_RELATION_MATRIX180 = build_stair_height_relation_matrix180()
 
 
 def configure_position_backend(lidar_type):
@@ -255,9 +408,18 @@ def configure_position_backend(lidar_type):
     position_backend.set_lidar_type(lidar_type)
     backend = position_backend.get_position_backend()
 
-    global position_lib, STAIR_HEIGHT_RELATION_MATRIX
+    global position_lib
+    global STAIR_HEIGHT_RELATION_MATRIX
+    global STAIR_HEIGHT_RELATION_MATRIX0
+    global STAIR_HEIGHT_RELATION_MATRIX90
+    global STAIR_HEIGHT_RELATION_MATRIXNEG90
+    global STAIR_HEIGHT_RELATION_MATRIX180
     position_lib = backend
     STAIR_HEIGHT_RELATION_MATRIX = build_stair_height_relation_matrix()
+    STAIR_HEIGHT_RELATION_MATRIX0 = build_stair_height_relation_matrix0()
+    STAIR_HEIGHT_RELATION_MATRIX90 = build_stair_height_relation_matrix90()
+    STAIR_HEIGHT_RELATION_MATRIXNEG90 = build_stair_height_relation_matrixneg90()
+    STAIR_HEIGHT_RELATION_MATRIX180 = build_stair_height_relation_matrix180()
     return backend
 
 
@@ -270,9 +432,39 @@ def get_stair_matrix_row(stair_id):
     return stair_matrix_index, stair_matrix[stair_matrix_index]
 
 
+def get_stair_matrix_row_for_angle(stair_id, angle_deg):
+    stair_matrix = get_stair_matrix_for_angle(angle_deg)
+    stair_matrix_index = tools.stair_id_to_matrix_index(
+        stair_id,
+        stair_matrix=stair_matrix,
+    )
+    return stair_matrix_index, stair_matrix[stair_matrix_index]
+
+
 def get_stair_xy(stair_id):
     _, stair_row = get_stair_matrix_row(stair_id)
     return float(stair_row[4]), float(stair_row[5])
+
+
+def get_stair_xy_for_angle(stair_id, angle_deg):
+    _, stair_row = get_stair_matrix_row_for_angle(stair_id, angle_deg)
+    return float(stair_row[4]), float(stair_row[5])
+
+
+def get_stair_xy0(stair_id):
+    return get_stair_xy_for_angle(stair_id, 0.01)
+
+
+def get_stair_xy90(stair_id):
+    return get_stair_xy_for_angle(stair_id, 90)
+
+
+def get_stair_xyneg90(stair_id):
+    return get_stair_xy_for_angle(stair_id, -90)
+
+
+def get_stair_xy180(stair_id):
+    return get_stair_xy_for_angle(stair_id, 180)
 
 
 def get_stair_height_relation(stair_id, direction):
@@ -284,7 +476,7 @@ def get_stair_height_relation(stair_id, direction):
       1: 该方向台阶比当前台阶高
       2: 该方向台阶比当前台阶低
 
-    本函数按当前红/蓝半场方向语义查找目标邻格，不直接使用矩阵第 1/2/3
+    本函数按统一方向语义查找目标邻格，不直接使用矩阵第 1/2/3
     列，避免地图坐标系和方向语义调整后矩阵列含义滞后。
     """
     stair_id = int(stair_id)
@@ -297,20 +489,12 @@ def get_stair_height_relation(stair_id, direction):
     current_y = float(stair_row[5])
     stair_matrix = get_stair_matrix()
     stair_side_length = get_stair_side_length()
-    if position_backend.is_blue_field():
-        direction_to_delta = {
-            1: (0.0, -stair_side_length),
-            2: (stair_side_length, 0.0),
-            3: (-stair_side_length, 0.0),
-            4: (0.0, stair_side_length),
-        }
-    else:
-        direction_to_delta = {
-            1: (0.0, stair_side_length),
-            2: (-stair_side_length, 0.0),
-            3: (stair_side_length, 0.0),
-            4: (0.0, -stair_side_length),
-        }
+    direction_to_delta = {
+        1: (0.0, stair_side_length),
+        2: (-stair_side_length, 0.0),
+        3: (stair_side_length, 0.0),
+        4: (0.0, -stair_side_length),
+    }
     delta_x, delta_y = direction_to_delta[direction]
     expected_x = current_x + delta_x
     expected_y = current_y + delta_y
@@ -534,6 +718,9 @@ def get_latest_odometry(node: OdometrySubscriber, max_age_sec=0.25):
         return None
 
     data = extract_odometry_params(odom_msg)
+    transform_odometry_for_field = getattr(position_lib, "transform_odometry_for_field", None)
+    if transform_odometry_for_field is not None:
+        data = transform_odometry_for_field(data)
     data["age_sec"] = age_sec
     return data
 

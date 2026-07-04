@@ -31,8 +31,7 @@ def _import_matplotlib():
 # ============================================
 
 # 位置编号 → (forward_index, left_index, height)
-# 这里是与真实地图轴解耦的逻辑网格；方向码按当前红/蓝半场语义由
-# get_direction_code() 统一计算，真实地图中的 yaw 映射由 lib2/tools.py 处理。
+# 这里是与真实地图轴解耦的逻辑网格；方向码统一按 red 逻辑计算。
 # 颜色：20-深绿色   40-正常绿    60-浅绿色
 #
 # 地图布局：
@@ -59,7 +58,7 @@ PATH_REACH_COST = 0.0
 PATH_ROTATION_COST = 1.0
 PATH_R1_MOVE_EXTRA_COST = 0.5
 PATH_INITIAL_YAW_DEG_RED = 90.0
-PATH_INITIAL_YAW_DEG_BLUE = -90.0
+PATH_INITIAL_YAW_DEG_BLUE = 90.0
 PATH_COST_EPSILON = 1e-9
 
 
@@ -138,7 +137,7 @@ POS_TO_COORD_RED = {
 
 
 POS_TO_COORD_BLUE = {
-    # Left field placeholders. Fill these with measured/logical coordinates if needed.
+    # 蓝半场梅林编号按物理镜像对换：1/3、4/6、7/9、10/12、13/15。
     1: (0, 0, 40),
     2: (0, 1, 20),   # 入口位置
     3: (0, 2, 40),
@@ -275,7 +274,7 @@ def configure_path_costs(
 
 
 def get_direction_code(from_pos, to_pos):
-    """按当前红/蓝半场语义计算 1-12 内相邻格方向码。"""
+    """按统一方向语义计算 1-12 内相邻格方向码。"""
     if from_pos == to_pos:
         return 0
 
@@ -283,20 +282,12 @@ def get_direction_code(from_pos, to_pos):
     to_x, to_y, _ = pos_to_coord[int(to_pos)]
     delta = (to_x - from_x, to_y - from_y)
 
-    if position_backend.is_blue_field():
-        direction_codes = {
-            (1, 0): 4,
-            (-1, 0): 1,
-            (0, 1): 3,
-            (0, -1): 2,
-        }
-    else:
-        direction_codes = {
-            (1, 0): 1,
-            (-1, 0): 4,
-            (0, 1): 2,
-            (0, -1): 3,
-        }
+    direction_codes = {
+        (1, 0): 1,
+        (-1, 0): 4,
+        (0, 1): 2,
+        (0, -1): 3,
+    }
     return direction_codes.get(delta, 0)
 
 
@@ -334,20 +325,12 @@ def get_move_facing_direction(from_pos, to_pos):
 
 def _direction_to_yaw_deg(direction):
     direction = int(direction)
-    if position_backend.is_blue_field():
-        direction_to_yaw = {
-            1: 90.0,
-            2: 0.01,
-            3: 180.0,
-            4: -90.0,
-        }
-    else:
-        direction_to_yaw = {
-            1: 90.0,
-            2: 180.0,
-            3: 0.01,
-            4: -90.0,
-        }
+    direction_to_yaw = {
+        1: 90.0,
+        2: 180.0,
+        3: 0.01,
+        4: -90.0,
+    }
     return direction_to_yaw.get(direction)
 
 

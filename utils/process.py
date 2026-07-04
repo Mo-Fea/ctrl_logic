@@ -37,19 +37,25 @@ except ImportError:
     Image = None
 
 
-DEFAULT_COLOR_WIDTH = 640
-DEFAULT_COLOR_HEIGHT = 480
+DEFAULT_COLOR_WIDTH = 1280
+DEFAULT_COLOR_HEIGHT = 720
 DEFAULT_COLOR_FPS = 30
 DEFAULT_WARMUP_FRAMES = 15
 DEFAULT_WARMUP_TIMEOUT_MS = 5000
 DEFAULT_WARMUP_RETRY_COUNT = 3
 DEFAULT_REALSENSE_STREAM_CANDIDATES = (
-    (640, 480, 30),
-    (848, 480, 30),
     (1280, 720, 30),
+    (848, 480, 30),
+    (640, 480, 30),
 )
+DEFAULT_REALSENSE_COLOR_AUTO_EXPOSURE = False
+DEFAULT_REALSENSE_COLOR_EXPOSURE = 120.0
+DEFAULT_REALSENSE_COLOR_GAIN = 32.0
 DEFAULT_QR_LENGTH = 12
 DEFAULT_QR_ALLOWED_CHARS = frozenset("0123")
+DEFAULT_HEAVY_DETECT_INTERVAL = 30
+DEFAULT_ROI_KEEP_FRAMES = 30
+DEFAULT_ROI_MARGIN_RATIO = 0.35
 IMAGE_SOURCE_D435I = 1
 IMAGE_SOURCE_ODIN = 2
 DEFAULT_IMAGE_SOURCE = IMAGE_SOURCE_D435I
@@ -155,6 +161,66 @@ def _warmup_realsense_pipeline(
             )
 
 
+def _configure_realsense_color_sensor(
+    profile,
+    enable_auto_exposure=DEFAULT_REALSENSE_COLOR_AUTO_EXPOSURE,
+    exposure=DEFAULT_REALSENSE_COLOR_EXPOSURE,
+    gain=DEFAULT_REALSENSE_COLOR_GAIN,
+):
+    """
+    配置 RealSense 彩色传感器曝光。
+
+    LCD 屏幕二维码场景下，自动曝光容易把白底和反光区域打爆。
+    这里尽量设置彩色传感器；不支持的设备/选项只警告，不中断取流。
+    """
+    if profile is None or rs is None:
+        return {"applied": False, "reason": "no_profile_or_realsense"}
+
+    device = profile.get_device()
+    color_sensor = None
+    for sensor in device.query_sensors():
+        try:
+            sensor_name = sensor.get_info(rs.camera_info.name).lower()
+        except Exception:
+            sensor_name = ""
+        if "rgb" in sensor_name or "color" in sensor_name:
+            color_sensor = sensor
+            break
+    if color_sensor is None:
+        return {"applied": False, "reason": "color_sensor_not_found"}
+
+    result = {
+        "applied": True,
+        "enable_auto_exposure": None,
+        "exposure": None,
+        "gain": None,
+        "warnings": [],
+    }
+
+    option_values = (
+        (rs.option.enable_auto_exposure, enable_auto_exposure, "enable_auto_exposure"),
+        (rs.option.exposure, exposure, "exposure"),
+        (rs.option.gain, gain, "gain"),
+    )
+    for option, value, name in option_values:
+        if value is None:
+            continue
+        try:
+            if color_sensor.supports(option):
+                option_value = (
+                    float(bool(value))
+                    if name == "enable_auto_exposure"
+                    else float(value)
+                )
+                color_sensor.set_option(option, option_value)
+                result[name] = option_value
+            else:
+                result["warnings"].append(f"{name}: unsupported")
+        except Exception as exc:
+            result["warnings"].append(f"{name}: {exc!r}")
+    return result
+
+
 def open_d435i(
     width=DEFAULT_COLOR_WIDTH,
     height=DEFAULT_COLOR_HEIGHT,
@@ -163,6 +229,9 @@ def open_d435i(
     warmup_timeout_ms=DEFAULT_WARMUP_TIMEOUT_MS,
     warmup_retry_count=DEFAULT_WARMUP_RETRY_COUNT,
     enable_fallback=True,
+    color_auto_exposure=DEFAULT_REALSENSE_COLOR_AUTO_EXPOSURE,
+    color_exposure=DEFAULT_REALSENSE_COLOR_EXPOSURE,
+    color_gain=DEFAULT_REALSENSE_COLOR_GAIN,
 ):
     """
     打开 RealSense D435i/D455 彩色流并预热若干帧。
@@ -213,6 +282,13 @@ def open_d435i(
                 f"{device_name} (S/N: {serial}), "
                 f"stream={candidate_width}x{candidate_height}@{candidate_fps}"
             )
+            sensor_config_result = _configure_realsense_color_sensor(
+                profile=profile,
+                enable_auto_exposure=color_auto_exposure,
+                exposure=color_exposure,
+                gain=color_gain,
+            )
+            print(f"[信息]: RealSense 彩色传感器配置: {sensor_config_result}")
 
             _warmup_realsense_pipeline(
                 pipeline=pipeline,
@@ -455,12 +531,201 @@ def create_qr_detector():
     return cv2.QRCodeDetector()
 
 
+def _decode_qr_candidate(detector, image):
+    data, _, _ = detector.detectAndDecode(image)
+    return "" if data is None else str(data).strip()
+
+
+def _decode_qr_candidate_with_points(
+    detector,
+    image,
+    x_offset=0,
+    y_offset=0,
+    scale=1.0,
+):
+    data, points, _ = detector.detectAndDecode(image)
+    data = "" if data is None else str(data).strip()
+    if points is not None:
+        points = np.asarray(points, dtype=np.float32) / float(scale)
+        points[:, :, 0] += float(x_offset)
+        points[:, :, 1] += float(y_offset)
+    return data, points
+
+
+def qr_points_to_roi(points, frame_shape, margin_ratio=DEFAULT_ROI_MARGIN_RATIO):
+    """按二维码四点生成带边距的 ROI，用于下一帧优先小范围识别。"""
+    if points is None:
+        return None
+    pts = np.asarray(points, dtype=np.float32).reshape(-1, 2)
+    if pts.size == 0:
+        return None
+    height, width = frame_shape[:2]
+    x_min = float(np.min(pts[:, 0]))
+    x_max = float(np.max(pts[:, 0]))
+    y_min = float(np.min(pts[:, 1]))
+    y_max = float(np.max(pts[:, 1]))
+    box_w = max(1.0, x_max - x_min)
+    box_h = max(1.0, y_max - y_min)
+    margin = max(box_w, box_h) * float(margin_ratio)
+    left = max(0, int(x_min - margin))
+    top = max(0, int(y_min - margin))
+    right = min(width, int(x_max + margin))
+    bottom = min(height, int(y_max + margin))
+    if right <= left or bottom <= top:
+        return None
+    return left, top, right, bottom
+
+
+def crop_qr_roi(frame, roi):
+    if roi is None:
+        return None
+    left, top, right, bottom = roi
+    if right <= left or bottom <= top:
+        return None
+    return frame[top:bottom, left:right]
+
+
+def _iter_light_qr_candidates(frame):
+    if frame is None:
+        return
+    yield frame
+    if frame.ndim == 2:
+        return
+    yield cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+
+
+def _iter_heavy_qr_preprocess_candidates(frame, include_upscaled=False):
+    """
+    针对 LCD 屏幕黑白二维码生成识别候选图。
+
+    原图清晰不代表 QRCodeDetector 容易解码。屏幕像素、反光和摩尔纹会让
+    二维码边缘变成灰边/彩边；这里用灰度、对比度增强、二值化和放大重试。
+    """
+    if frame is None:
+        return
+
+    if frame.ndim == 2:
+        gray = frame
+    else:
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    yield gray, 1.0
+
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    enhanced = clahe.apply(gray)
+    yield enhanced, 1.0
+
+    blurred = cv2.GaussianBlur(enhanced, (3, 3), 0)
+    _, otsu = cv2.threshold(
+        blurred,
+        0,
+        255,
+        cv2.THRESH_BINARY | cv2.THRESH_OTSU,
+    )
+    yield otsu, 1.0
+    yield cv2.bitwise_not(otsu), 1.0
+
+    adaptive = cv2.adaptiveThreshold(
+        enhanced,
+        255,
+        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+        cv2.THRESH_BINARY,
+        31,
+        3,
+    )
+    yield adaptive, 1.0
+
+    if not include_upscaled:
+        return
+
+    for scale in (2.0, 3.0):
+        for source, interpolation in (
+            (gray, cv2.INTER_CUBIC),
+            (enhanced, cv2.INTER_CUBIC),
+            (otsu, cv2.INTER_NEAREST),
+            (adaptive, cv2.INTER_NEAREST),
+        ):
+            yield (
+                cv2.resize(
+                    source,
+                    None,
+                    fx=scale,
+                    fy=scale,
+                    interpolation=interpolation,
+                ),
+                scale,
+            )
+
+
+def _iter_qr_preprocess_candidates(frame):
+    yield from _iter_light_qr_candidates(frame)
+    for candidate, _ in _iter_heavy_qr_preprocess_candidates(
+        frame,
+        include_upscaled=True,
+    ):
+        yield candidate
+
+
+def detect_qr_realtime(
+    frame,
+    detector=None,
+    tracked_roi=None,
+    use_heavy_fallback=False,
+    include_upscaled=False,
+):
+    """
+    实时二维码识别：ROI 优先，每帧只跑轻量候选，重处理由调用方低频触发。
+
+    返回 (data, points, path)，path 用于调试当前命中的路径：
+    roi/full_light/full_heavy/none。
+    """
+    if detector is None:
+        detector = create_qr_detector()
+
+    if tracked_roi is not None:
+        roi_frame = crop_qr_roi(frame, tracked_roi)
+        if roi_frame is not None:
+            left, top, _, _ = tracked_roi
+            for candidate in _iter_light_qr_candidates(roi_frame):
+                data, points = _decode_qr_candidate_with_points(
+                    detector,
+                    candidate,
+                    x_offset=left,
+                    y_offset=top,
+                )
+                if data:
+                    return data, points, "roi"
+
+    for candidate in _iter_light_qr_candidates(frame):
+        data, points = _decode_qr_candidate_with_points(detector, candidate)
+        if data:
+            return data, points, "full_light"
+
+    if use_heavy_fallback:
+        for candidate, scale in _iter_heavy_qr_preprocess_candidates(
+            frame,
+            include_upscaled=include_upscaled,
+        ):
+            data, points = _decode_qr_candidate_with_points(
+                detector,
+                candidate,
+                scale=scale,
+            )
+            if data:
+                return data, points, "full_heavy"
+
+    return "", None, "none"
+
+
 def detect_qr_data(frame, detector=None):
     """从单帧图像中读取二维码字符串；未识别到时返回空字符串。"""
     if detector is None:
         detector = create_qr_detector()
-    data, _, _ = detector.detectAndDecode(frame)
-    return "" if data is None else str(data).strip()
+
+    for candidate in _iter_qr_preprocess_candidates(frame):
+        data = _decode_qr_candidate(detector, candidate)
+        if data:
+            return data
+    return ""
 
 
 def is_valid_qr_payload(

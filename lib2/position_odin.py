@@ -11,56 +11,94 @@ import math
 from lib2 import position_backend
 
 
-ENTRANCE_X_RED = 1.730
-ENTRANCE_Y_RED = 0.511
+entrance_x0_red = 3.161
+entrance_y0_red = 1.741
+
+entrance_x90_red = 3.098
+entrance_y90_red = 1.770
+
+entrance_xneg90_red = 3.137
+entrance_yneg90_red = 1.693
+
+entrance_x180_red = 3.081
+entrance_y180_red = 1.717
+ENTRANCE_X0_RED = entrance_x0_red
+ENTRANCE_X90_RED = entrance_x90_red
+ENTRANCE_XNEG90_RED = entrance_xneg90_red
+ENTRANCE_X180_RED = entrance_x180_red
+ENTRANCE_Y0_RED = entrance_y0_red
+ENTRANCE_Y90_RED = entrance_y90_red
+ENTRANCE_YNEG90_RED = entrance_yneg90_red
+ENTRANCE_Y180_RED = entrance_y180_red
+ENTRANCE_X_RED = ENTRANCE_X0_RED
+ENTRANCE_Y_RED = ENTRANCE_Y0_RED
 PRE_ENTRANCE_X_RED = 0.500
 PRE_ENTRANCE_Y_RED = 1.776
 WEAPON_TARGETS_RED = {
-    1: (-1.155, -2.451),
-    2: (-1.148, -2.252),
-    3: (-1.153, -2.053),
-    4: (-1.145, -1.852),
-    5: (-1.147, -1.652),
+    1: (0.142, -1.320),
+    2: (0.142, -1.120),
+    3: (0.142, -0.920),
+    4: (0.142, -0.720),
+    5: (0.142, -0.520),
     6: (1.147, -1.145),
 }
 WEAPON_RETREAT_STOP_Y_RED = -4.00
 
 # 九宫格区域坐标占位（二维坐标，待实测后替换）
-pre_entrance9_red = (3.905, 5.203)
-entrance9_red = (3.91, 7.960)
-column1_red = (0.0, 0.0)
-column2_red = (-0.801, 7.337)
+pre_entrance9_red = (4.995, 6.927)
+entrance9_red = (4.995, 9.228)
+column1_red = (0.6, 8.0)
+pre_column1_red = (3.7748, 7.8218)
+column2_red = (0.570, 8.532)
 column3_red = (0.0, 0.0)
-pre_climb_R2_red = (0.0, 0.0)
-climb_R2_red = (0.0, 0.0)   
-pre_R1climb_red = (0.0, 0.0)
-R1climb_red = (0.0, 0.0)
+pre_R1climb_red = (3.450,9.241)
+pre_climb_R1_red = pre_R1climb_red
+R1climb_red = (3.450, 9.241)
 
 
 # Left field placeholders. Fill these with measured coordinates from the real field.
-ENTRANCE_X_BLUE = -0.55
-ENTRANCE_Y_BLUE = -1.55
+entrance_x0_blue = 2.530
+entrance_y0_blue = -2.216
+
+entrance_x90_blue = 2.469
+entrance_y90_blue = -2.1985
+
+entrance_xneg90_blue = 2.455
+entrance_yneg90_blue = -2.264
+
+entrance_x180_blue = 2.423
+entrance_y180_blue = -2.231
+ENTRANCE_X0_BLUE = entrance_x0_blue
+ENTRANCE_X90_BLUE = entrance_x90_blue
+ENTRANCE_XNEG90_BLUE = entrance_xneg90_blue
+ENTRANCE_X180_BLUE = entrance_x180_blue
+ENTRANCE_Y0_BLUE = entrance_y0_blue
+ENTRANCE_Y90_BLUE = entrance_y90_blue
+ENTRANCE_YNEG90_BLUE = entrance_yneg90_blue
+ENTRANCE_Y180_BLUE = entrance_y180_blue
+ENTRANCE_X_BLUE = ENTRANCE_X0_BLUE
+ENTRANCE_Y_BLUE = ENTRANCE_Y0_BLUE
 PRE_ENTRANCE_X_BLUE = 0.500
 PRE_ENTRANCE_Y_BLUE = -1.776
 WEAPON_TARGETS_BLUE = {
-    1: (1.840, 1.312),
-    2: (1.902, 1.342),
-    3: (2.265, 1.33),
-    4: (2.191, 1.150),
-    5: (1.996, 1.150),
+    1: (-0.0964, -0.713),
+    2: (-0.0964, -0.513),
+    3: (-0.0964, -0.313),
+    4: (-0.0964, -0.113),
+    5: (-0.0964, 0.113),
     6: (1.793, 1.150),
 }
 WEAPON_RETREAT_STOP_Y_BLUE = 4.00
 
-pre_entrance9_blue = (0.0, 0.0)
-entrance9_blue = (0.0, 0.0)
-column1_blue = (0.0, 0.0)
-column2_blue = (0.0, 0.0)
+pre_entrance9_blue = (4.7577, -7.0424)
+entrance9_blue = (-4.5354, -9.6278)
+column1_blue = (0.6638, -8.5115)
+pre_column1_blue = (3.4815, -8.4516)
+column2_blue = (0.6638, -9.0415)
 column3_blue = (0.0, 0.0)
-pre_climb_R2_blue = (0.0, 0.0)
-climb_R2_blue = (0.0, 0.0)
 pre_R1climb_blue = (0.0, 0.0)
-R1climb_blue = (0.0, 0.0)
+pre_climb_R1_blue = pre_R1climb_blue
+R1climb_blue = (3.6155, -9.6564)
 
 
 # Backward-compatible defaults: current main flow still uses red/right field.
@@ -70,6 +108,7 @@ PRE_ENTRANCE_X = PRE_ENTRANCE_X_RED
 PRE_ENTRANCE_Y = PRE_ENTRANCE_Y_RED
 WEAPON_TARGETS = WEAPON_TARGETS_RED
 WEAPON_RETREAT_STOP_Y = WEAPON_RETREAT_STOP_Y_RED
+pre_column1 = pre_column1_red
 
 
 def _select_field_value(red_value, blue_value):
@@ -101,8 +140,8 @@ def get_weapon_targets():
 def get_weapon_retreat_stop_y():
     return float(_select_field_value(WEAPON_RETREAT_STOP_Y_RED, WEAPON_RETREAT_STOP_Y_BLUE))
 
-LIDAR_TO_BASE_X = - 0.399  # m
-LIDAR_TO_BASE_Y = - 0.246  # m
+LIDAR_TO_BASE_X = - 0.3325  # m
+LIDAR_TO_BASE_Y = - 0.040  # m
 LIDAR_TO_BASE_Z = 0.0
 T_LIDAR_TO_BASE = np.array([
     [1.0, 0.0, 0.0, LIDAR_TO_BASE_X],
@@ -112,8 +151,8 @@ T_LIDAR_TO_BASE = np.array([
 ], dtype=float)
 
 
-LIDAR_TO_WEAPON_X = -0.742  # m
-LIDAR_TO_WEAPON_Y = -0.246  # m
+LIDAR_TO_WEAPON_X = 0.199  # m
+LIDAR_TO_WEAPON_Y = -0.040  # m
 LIDAR_TO_WEAPON_Z = 0.0  # m
 T_LIDAR_TO_WEAPON = np.array([
     [1.0, 0.0, 0.0, LIDAR_TO_WEAPON_X],
@@ -121,6 +160,7 @@ T_LIDAR_TO_WEAPON = np.array([
     [0.0, 0.0, 1.0, LIDAR_TO_WEAPON_Z],
     [0.0, 0.0, 0.0, 1.0],
 ], dtype=float)
+ODIN_YAW_OFFSET_DEG = 180.0
 
 #-----------------------------------------------------------------------------------------------------
 # 获取 雷达->机器人中心 的固定齐次变换矩阵(4x4)
@@ -310,8 +350,54 @@ def rotation_matrix_to_yaw(rotation_matrix: np.ndarray):
     return math.atan2(rotation_matrix[1, 0], rotation_matrix[0, 0])
 
 
+def normalize_yaw_deg(yaw_deg):
+    yaw_deg = float(yaw_deg)
+    while yaw_deg >= 180.0:
+        yaw_deg -= 360.0
+    while yaw_deg < -180.0:
+        yaw_deg += 360.0
+    return yaw_deg
+
+
+def _mirror_yaw_deg_for_blue_field(yaw_deg):
+    return normalize_yaw_deg(180.0 - float(yaw_deg))
+
+
+def _transform_x_for_field(x):
+    x = float(x)
+    if position_backend.is_blue_field():
+        return -x
+    return x
+
+
 def radians_to_degrees(angle_rad):
-    return math.degrees(angle_rad)
+    yaw_deg = normalize_yaw_deg(math.degrees(angle_rad) + ODIN_YAW_OFFSET_DEG)
+    if position_backend.is_blue_field():
+        yaw_deg = _mirror_yaw_deg_for_blue_field(yaw_deg)
+    return yaw_deg
+
+
+def transform_odometry_for_field(odometry):
+    """
+    按当前红/蓝半场调整 odom 输出。
+
+    红场保持原值；蓝场将雷达输出镜像到 y 轴对称坐标系:
+      x -> -x
+      yaw -> 180 - yaw
+      linear_x -> -linear_x
+      angular_z -> -angular_z
+    """
+    if odometry is None or not position_backend.is_blue_field():
+        return odometry
+
+    transformed = dict(odometry)
+    transformed["position_x"] = -float(transformed["position_x"])
+    transformed["yaw_deg"] = _mirror_yaw_deg_for_blue_field(transformed["yaw_deg"])
+    transformed["yaw_rad"] = math.radians(transformed["yaw_deg"])
+    transformed["linear_x"] = -float(transformed["linear_x"])
+    transformed["angular_z"] = -float(transformed["angular_z"])
+    transformed["field_transform"] = "blue_mirror_x"
+    return transformed
 
 #将ROS2的TransformStamped消息转换为4x4齐次变换矩阵
 def transform_to_matrix(transform_msg):
@@ -338,7 +424,7 @@ def _stamp_to_ros_time(stamp_msg):
 
 def _lidar_pose_from_matrices(T_map_odom: np.ndarray, T_odom_base: np.ndarray, stamp_sec=None, age_sec=None):
     T_map_lidar = T_map_odom @ T_odom_base
-    x = float(T_map_lidar[0, 3])
+    x = _transform_x_for_field(T_map_lidar[0, 3])
     y = float(T_map_lidar[1, 3])
     z = float(T_map_lidar[2, 3])
     yaw = math.atan2(T_map_lidar[1, 0], T_map_lidar[0, 0])
@@ -461,7 +547,7 @@ def cal_robot_position(T_map_lidar: np.ndarray):
     """
     T_map_robot = T_map_lidar @ get_t_lidar_to_base()
 
-    x = float(T_map_robot[0, 3])
+    x = _transform_x_for_field(T_map_robot[0, 3])
     y = float(T_map_robot[1, 3])
     z = float(T_map_robot[2, 3])
     yaw = math.atan2(T_map_robot[1, 0], T_map_robot[0, 0])
@@ -517,7 +603,7 @@ def cal_weapon_position(T_map_lidar: np.ndarray):
     """
     T_map_weapon = T_map_lidar @ get_t_lidar_to_weapon()
 
-    x = float(T_map_weapon[0, 3])
+    x = _transform_x_for_field(T_map_weapon[0, 3])
     y = float(T_map_weapon[1, 3])
     z = float(T_map_weapon[2, 3])
     yaw = math.atan2(T_map_weapon[1, 0], T_map_weapon[0, 0])

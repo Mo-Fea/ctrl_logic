@@ -22,6 +22,8 @@ SAFE_SWITCH_VALUE = 1
 CYLINDER_SELECT_BOTH = 0
 CYLINDER_SELECT_PF2 = 1
 CYLINDER_SELECT_PF3 = 2
+MOTION_CHANNEL_SCALE_NUMERATOR = 3
+MOTION_CHANNEL_SCALE_DENOMINATOR = 4
 relocalization_flag = False
 AUTO_TRIGGER_LOCK = threading.Lock()
 
@@ -223,6 +225,13 @@ def validate_cylinder_select(cylinder_select):
     return cylinder_select
 
 
+def scale_motion_channel_value(index, value):
+    value = int(value)
+    if int(index) not in (0, 2):
+        return value
+    return int(value * MOTION_CHANNEL_SCALE_NUMERATOR / MOTION_CHANNEL_SCALE_DENOMINATOR)
+
+
 def build_frame(seq, channels, yaw_i16=0, des_yaw_i16=0, cylinder_select=CYLINDER_SELECT_BOTH):
     """
     帧格式:
@@ -373,8 +382,7 @@ def _apply_lidar_correction(x, y, yaw_deg):
         print(f"{_apply_lidar_correction.__name__}输入错误: yaw_deg={yaw_deg}")
         sys.exit(1)
 
-    dx, dy = correction_table[yaw_deg]
-    return float(x) + float(dx), float(y) + float(dy)
+    return float(x), float(y)
 
 
 def deg0_correction(x, y):
@@ -414,24 +422,12 @@ def direction_int_to_yaw_deg(direction):
         print(f"{direction_int_to_yaw_deg.__name__}输入错误")
         sys.exit(1)
 
-    # 方向编号表达任务/场地语义；红蓝半场的 map x 轴物理方向相反，
-    # 因此 x 轴相关的 2/3 方向需要按半场交换 yaw。
-    from lib2 import position_backend
-
-    if position_backend.is_blue_field():
-        direction_to_yaw = {
-            1: 90.00,
-            2: 0.01,
-            3: 180.00,
-            4: -90.00,
-        }
-    else:
-        direction_to_yaw = {
-            1: 90.00,
-            2: 180.00,
-            3: 0.01,
-            4: -90.00,
-        }
+    direction_to_yaw = {
+        1: 90.00,
+        2: 180.00,
+        3: 0.01,
+        4: -90.00,
+    }
 
     return round(float(direction_to_yaw[direction]), 2)
 
@@ -460,19 +456,13 @@ def stair_id_to_direction(from_id, to_id, stair_matrix=None, exit_on_error=True)
 
     返回值沿用动作矩阵方向编码:
       0: 不相邻
-      1/2/3/4: 当前红蓝场语义下的四方向编号。
+      1/2/3/4: 四方向编号。
 
-    当前实测方向语义:
-      红场:
-        dx > 0 -> direction 3  # 0.01deg, x+
-        dx < 0 -> direction 2  # 180deg, x-
-        dy > 0 -> direction 1  # 90deg, y+
-        dy < 0 -> direction 4  # -90deg, y-
-      蓝场:
-        dx > 0 -> direction 2  # 0.01deg, x+
-        dx < 0 -> direction 3  # 180deg, x-
-        dy > 0 -> direction 4  # -90deg, y+
-        dy < 0 -> direction 1  # 90deg, y-
+    当前方向语义:
+      dx > 0 -> direction 3  # 0.01deg, x+
+      dx < 0 -> direction 2  # 180deg, x-
+      dy > 0 -> direction 1  # 90deg, y+
+      dy < 0 -> direction 4  # -90deg, y-
 
     默认读取 position_resource.get_stair_matrix()，并使用矩阵中的真实 x/y 坐标判断，
     不依赖编号是否连续，因此 3 和 4 这种跨行编号不会被误判为左右相邻。
@@ -503,18 +493,10 @@ def stair_id_to_direction(from_id, to_id, stair_matrix=None, exit_on_error=True)
         major_axis_max = side_length * 1.25
         minor_axis_max = side_length * 0.2
 
-        from lib2 import position_backend
-
         if major_axis_min <= abs_dx <= major_axis_max and abs_dy <= minor_axis_max:
-            if position_backend.is_blue_field():
-                direction = 2 if dx > 0.0 else 3
-            else:
-                direction = 3 if dx > 0.0 else 2
+            direction = 3 if dx > 0.0 else 2
         elif major_axis_min <= abs_dy <= major_axis_max and abs_dx <= minor_axis_max:
-            if position_backend.is_blue_field():
-                direction = 4 if dy > 0.0 else 1
-            else:
-                direction = 1 if dy > 0.0 else 4
+            direction = 1 if dy > 0.0 else 4
 
     if direction == 0 and exit_on_error:
         print(f"{stair_id_to_direction.__name__}输入错误: {from_id} 与 {to_id} 不相邻")
@@ -689,7 +671,7 @@ class frame_thread:
         index = int(index)
         if index < 0 or index >= CHANNEL_COUNT:
             raise ValueError(f"channel index must be 0..{CHANNEL_COUNT - 1}, got {index}")
-        setattr(self, f"ch{index}", int(value))
+        setattr(self, f"ch{index}", scale_motion_channel_value(index, value))
 
     def set_channel(self, index, value):
         """

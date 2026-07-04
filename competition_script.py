@@ -186,6 +186,26 @@ def run_full_confrontation_match():
         }
     print("区域1执行完成")
 
+    replan_result = None
+    if region_1_result.get("action_matrix") is None:
+        print("区域1未获取到二维码动作矩阵，使用当前 meilin_situration 重规划")
+        replan_result = compete_logic.rigion_2_retry_plan(
+            r1_count=R1,
+            r2_count=R2,
+            required_r2_pickup_count=kfs_suck,
+            qr_string=meilin_situration,
+        )
+        if not replan_result.get("completed", False):
+            print_flow_failure("梅林重规划", replan_result)
+            return {
+                "completed": False,
+                "failed_region": "rigion_2_retry_plan",
+                "region_1_result": region_1_result,
+                "replan_result": replan_result,
+                "region_2_result": None,
+            }
+        print("梅林重规划执行完成")
+
     region_2_result = compete_logic.rigion_2(
         sender=sender,
         position_runtime=position_runtime,
@@ -198,6 +218,7 @@ def run_full_confrontation_match():
             "completed": False,
             "failed_region": "rigion_2",
             "region_1_result": region_1_result,
+            "replan_result": replan_result,
             "region_2_result": region_2_result,
         }
     print("区域2执行完成")
@@ -214,6 +235,7 @@ def run_full_confrontation_match():
             "completed": False,
             "failed_region": "rigion_3",
             "region_1_result": region_1_result,
+            "replan_result": replan_result,
             "region_2_result": region_2_result,
             "region_3_result": region_3_result,
         }
@@ -222,6 +244,7 @@ def run_full_confrontation_match():
         "completed": True,
         "failed_region": None,
         "region_1_result": region_1_result,
+        "replan_result": replan_result,
         "region_2_result": region_2_result,
         "region_3_result": region_3_result,
     }
@@ -274,10 +297,12 @@ def run_full_challenge_wulin_match():
     }
 
 
-def run_full_challenge_jiugong_match(wait_before_region_3=False):
+def run_full_challenge_jiugong_match(wait_before_region_3=False, kfs_preparation_result=None):
     print_current_config("完整比赛/挑战赛/九宫区域")
 
-    kfs_preparation_result = kfs.kfs_suck_preparation(sender=sender, count=kfs_suck)
+    prepared_here = kfs_preparation_result is None
+    if kfs_preparation_result is None:
+        kfs_preparation_result = kfs.kfs_suck_preparation(sender=sender, count=kfs_suck)
     if not kfs_preparation_result.get("completed", False):
         print("KFS吸取准备执行失败")
         return {
@@ -286,7 +311,8 @@ def run_full_challenge_jiugong_match(wait_before_region_3=False):
             "kfs_preparation_result": kfs_preparation_result,
             "region_3_result": None,
         }
-    print("KFS吸取准备执行完成")
+    if prepared_here:
+        print("KFS吸取准备执行完成")
 
     if wait_before_region_3:
         print("等待10秒")
@@ -422,10 +448,12 @@ def run_confrontation_meilin_retry():
     }
 
 
-def run_challenge_jiugong_retry():
+def run_challenge_jiugong_retry(kfs_preparation_result=None):
     print_current_config("区域重试/挑战赛/九宫格区域")
 
-    kfs_preparation_result = kfs.kfs_suck_preparation(sender=sender, count=kfs_suck)
+    prepared_here = kfs_preparation_result is None
+    if kfs_preparation_result is None:
+        kfs_preparation_result = kfs.kfs_suck_preparation(sender=sender, count=kfs_suck)
     if not kfs_preparation_result.get("completed", False):
         print("KFS吸取准备执行失败")
         return {
@@ -436,7 +464,8 @@ def run_challenge_jiugong_retry():
             "sucker_release_pose_result": None,
             "strategy_result": None,
         }
-    print("KFS吸取准备执行完成")
+    if prepared_here:
+        print("KFS吸取准备执行完成")
 
     read_int("输入1吸取完毕：", valid_values=(1,))
 
@@ -524,13 +553,24 @@ def challenge_wulin_flow():
 
 
 def challenge_jiugong_flow():
+    global kfs_suck
+
     print_separator()
     print("九宫区域（挑战赛）")
     print_back_option()
+    kfs_suck = 2
+    kfs_preparation_result = kfs.kfs_suck_preparation(sender=sender, count=kfs_suck)
+    if not kfs_preparation_result.get("completed", False):
+        print("KFS吸取准备执行失败")
+        return
+    print("KFS吸取准备执行完成")
     if not wait_start():
         return
     wait_choice = read_int("是否需要等待(0.否 1.是)：", valid_values=(0, 1))
-    run_full_challenge_jiugong_match(wait_before_region_3=(wait_choice == 1))
+    run_full_challenge_jiugong_match(
+        wait_before_region_3=(wait_choice == 1),
+        kfs_preparation_result=kfs_preparation_result,
+    )
 
 
 def confrontation_full_flow():
@@ -602,12 +642,17 @@ def jiugong_retry_flow():
     print("九宫格区域重试")
     print_back_option()
     kfs_suck = read_int("请输入需要吸取的KFS数量（0-2）：", min_value=0, max_value=2)
+    kfs_preparation_result = kfs.kfs_suck_preparation(sender=sender, count=kfs_suck)
+    if not kfs_preparation_result.get("completed", False):
+        print("KFS吸取准备执行失败")
+        return
+    print("KFS吸取准备执行完成")
     if not wait_start():
         return
     if current_rule == 1:
-        run_challenge_jiugong_retry()
+        run_challenge_jiugong_retry(kfs_preparation_result=kfs_preparation_result)
     elif current_rule == 2:
-        run_challenge_jiugong_retry()
+        run_challenge_jiugong_retry(kfs_preparation_result=kfs_preparation_result)
     else:
         print(ERROR_INPUT_TEXT)
 

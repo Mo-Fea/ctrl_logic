@@ -8,20 +8,26 @@ import numpy as np
 try:
     from . import race
     from .process import (
+        DEFAULT_HEAVY_DETECT_INTERVAL,
+        DEFAULT_ROI_KEEP_FRAMES,
         create_qr_detector,
-        detect_qr_data,
+        detect_qr_realtime,
         get_color_frame,
         is_valid_qr_payload,
         open_image_source,
+        qr_points_to_roi,
     )
 except ImportError:
     import race
     from process import (
+        DEFAULT_HEAVY_DETECT_INTERVAL,
+        DEFAULT_ROI_KEEP_FRAMES,
         create_qr_detector,
-        detect_qr_data,
+        detect_qr_realtime,
         get_color_frame,
         is_valid_qr_payload,
         open_image_source,
+        qr_points_to_roi,
     )
 
 try:
@@ -417,8 +423,8 @@ class ChallengeQRScanner:
     def __init__(
         self,
         result_queue=None,
-        stable_frame_count=5,
-        show_window=False,
+        stable_frame_count=2,
+        show_window=True,
         window_name="R2 QR Scanner",
         stop_after_success=True,
         loop_interval_sec=0.01,
@@ -426,6 +432,9 @@ class ChallengeQRScanner:
         image_source=1,
         put_action_matrix_only=False,
         running_lock=None,
+        heavy_detect_interval=DEFAULT_HEAVY_DETECT_INTERVAL,
+        roi_keep_frames=DEFAULT_ROI_KEEP_FRAMES,
+        full_detect=False,
     ):
         self.result_queue = result_queue if result_queue is not None else queue.Queue()
         self.stable_frame_count = int(stable_frame_count)
@@ -437,6 +446,9 @@ class ChallengeQRScanner:
         self.image_source = int(image_source)
         self.put_action_matrix_only = bool(put_action_matrix_only)
         self.running_lock = running_lock if running_lock is not None else SCANNER_RUNNING_LOCK
+        self.heavy_detect_interval = max(0, int(heavy_detect_interval))
+        self.roi_keep_frames = max(0, int(roi_keep_frames))
+        self.full_detect = bool(full_detect)
 
         self.stop_event = threading.Event()
         self.done_event = threading.Event()
@@ -445,6 +457,7 @@ class ChallengeQRScanner:
         self.last_error = None
         self.last_qr_data = None
         self.last_stable_count = 0
+        self.last_detect_path = None
 
     def start(self):
         if self.thread is not None and self.thread.is_alive():
@@ -487,6 +500,9 @@ class ChallengeQRScanner:
         pipeline = None
         stable_data = None
         stable_count = 0
+        frame_count = 0
+        tracked_roi = None
+        roi_last_seen_frame = 0
         lock_acquired = False
         try:
             self.running_lock.acquire()
@@ -503,7 +519,29 @@ class ChallengeQRScanner:
                     time.sleep(self.loop_interval_sec)
                     continue
 
-                data = detect_qr_data(frame, detector=detector)
+                frame_count += 1
+                if (
+                    tracked_roi is not None
+                    and self.roi_keep_frames > 0
+                    and frame_count - roi_last_seen_frame > self.roi_keep_frames
+                ):
+                    tracked_roi = None
+                use_heavy_fallback = (
+                    self.heavy_detect_interval > 0
+                    and frame_count % self.heavy_detect_interval == 0
+                )
+                data, points, detect_path = detect_qr_realtime(
+                    frame,
+                    detector=detector,
+                    tracked_roi=tracked_roi,
+                    use_heavy_fallback=use_heavy_fallback,
+                    include_upscaled=self.full_detect,
+                )
+                if points is not None:
+                    next_roi = qr_points_to_roi(points, frame.shape)
+                    if next_roi is not None:
+                        tracked_roi = next_roi
+                        roi_last_seen_frame = frame_count
                 if is_valid_qr_payload(data):
                     if data == stable_data:
                         stable_count += 1
@@ -516,8 +554,21 @@ class ChallengeQRScanner:
 
                 self.last_qr_data = stable_data
                 self.last_stable_count = stable_count
+                self.last_detect_path = detect_path
 
                 if self.show_window and cv2 is not None:
+                    if points is not None:
+                        pts = np.asarray(points, dtype=np.int32).reshape(-1, 2)
+                        cv2.polylines(
+                            frame,
+                            [pts],
+                            isClosed=True,
+                            color=(0, 220, 0),
+                            thickness=2,
+                        )
+                    if tracked_roi is not None:
+                        left, top, right, bottom = tracked_roi
+                        cv2.rectangle(frame, (left, top), (right, bottom), (255, 0, 0), 1)
                     cv2.imshow(self.window_name, frame)
                     if cv2.waitKey(1) == ord("q"):
                         self.stop_event.set()

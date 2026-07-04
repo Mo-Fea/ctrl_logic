@@ -7,14 +7,14 @@ import threading
 import time
 from dataclasses import dataclass
 
-from lib2 import kfs, module, move, position_backend, tools, weapon
+from lib2 import kfs, module, move, position_backend, position_resource, tools, weapon
 from utils import challenge_lib, race
 
 
 INVALID_INPUT_MESSAGE = "严格按照上述数字进行输入"
 LIDAR_TYPE = position_backend.LIDAR_TYPE_ODIN
 MOVE_TIMEOUT_SEC = 30.0
-QR_STABLE_FRAME_COUNT = 5
+QR_STABLE_FRAME_COUNT = 2
 current_stair_id = 0
 
 
@@ -187,13 +187,11 @@ def read_adjust_distance():
 
 
 def read_rotation_target_yaw():
-    prompt = "请输入原始地图坐标系下的目标角度（-180.00到180.00，最好保留两位小数）"
+    prompt = "请输入目标角度（-180.00到180.00，最好保留两位小数）"
     while True:
         value = read_finite_float(prompt)
         if -180.0 <= value <= 180.0:
-            converted_value = convert_yaw_after_map_rotation(value)
-            print(f"地图旋转后的目标角度：{converted_value:.2f}")
-            return converted_value
+            return value
         print(INVALID_INPUT_MESSAGE)
 
 
@@ -1191,21 +1189,73 @@ def run_place_second_level_box_test(context):
 def run_climb_r1_test(context):
     print("---------------------------------------------------------------------------------------------")
     print("上R1测试")
-    print("机器会面向九宫格方向，请将R1轨道对准R2")
+    print("机器会以目标角度移动到R1climb点，然后执行上R1")
     read_choice({"1"}, prompt="请回复1开始测试")
 
-    result = module.climb_R1(
+    target_yaw_deg = 180.0
+    coordinate_name = (
+        "R1climb_blue" if position_backend.is_blue_field() else "R1climb_red"
+    )
+    current_position_lib = position_resource.get_position_lib()
+    r1climb_target = move._get_corrected_battlefield_coordinate(
+        current_position_lib,
+        coordinate_name,
+    )
+
+    move_result = module.move_to_des(
         sender=context.sender,
         position_runtime=context.position_runtime,
         odom_runtime=context.odom_runtime,
+        x=r1climb_target["x"],
+        y=r1climb_target["y"],
+        target_deg=target_yaw_deg,
+        total_timeout_sec=MOVE_TIMEOUT_SEC,
+        reference="robot",
     )
+    if move_result is None or not move_result.get("completed", False):
+        result = {
+            "completed": False,
+            "executed": True,
+            "failed_step": "move_to_R1climb",
+            "target_yaw_deg": float(target_yaw_deg),
+            "r1climb_target": {
+                "coordinate_name": coordinate_name,
+                "raw_x": float(r1climb_target["raw_x"]),
+                "raw_y": float(r1climb_target["raw_y"]),
+                "x": float(r1climb_target["x"]),
+                "y": float(r1climb_target["y"]),
+            },
+            "move_result": move_result,
+            "climb_result": None,
+        }
+        print("上R1测试执行结果：")
+        print(result)
+        return result
+
+    climb_result = module.climb_R1(
+        sender=context.sender,
+        position_runtime=context.position_runtime,
+        odom_runtime=context.odom_runtime,
+        target_yaw_deg=target_yaw_deg,
+    )
+    result = {
+        "completed": bool(climb_result.get("completed", False)),
+        "executed": True,
+        "failed_step": None if climb_result.get("completed", False) else "climb_R1",
+        "target_yaw_deg": float(target_yaw_deg),
+        "r1climb_target": {
+            "coordinate_name": coordinate_name,
+            "raw_x": float(r1climb_target["raw_x"]),
+            "raw_y": float(r1climb_target["raw_y"]),
+            "x": float(r1climb_target["x"]),
+            "y": float(r1climb_target["y"]),
+        },
+        "move_result": move_result,
+        "climb_result": climb_result,
+    }
     print("上R1测试执行结果：")
     print(result)
-    return {
-        "completed": bool(result.get("completed", False)),
-        "executed": True,
-        "result": result,
-    }
+    return result
 
 
 def run_release_third_level_kfs_test(context):
@@ -1223,7 +1273,7 @@ def run_release_third_level_kfs_test(context):
         }
 
     print("不一定在R1上进行测试")
-    print("此测试效果为持续检测下降，当下降高度大于4cm时释放kfs")
+    print("此测试效果为持续检测下降，当下降高度大于2cm时释放kfs")
     timeout_enabled = read_choice(
         {"1", "2"},
         prompt="是否启用Z下降检测超时（1启用，2关闭）：",
@@ -1231,8 +1281,8 @@ def run_release_third_level_kfs_test(context):
     timeout_sec = None
     if timeout_enabled:
         timeout_sec = read_positive_float_with_default(
-            "请输入Z下降检测超时时间(秒，直接回车默认30)：",
-            30.0,
+            "请输入Z下降检测超时时间(秒，直接回车默认999)：",
+            999.0,
         )
     read_choice({"1"}, prompt="请输入1开始测试：")
 

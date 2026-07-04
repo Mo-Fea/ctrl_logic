@@ -48,41 +48,35 @@
 <line x1="15.0" y1="195.0" x2="52.0" y2="195.0" stroke="#dc2626" stroke-width="4" marker-end="url(#arrow-red)"/>
 <line x1="588.0" y1="90.0" x2="625.0" y2="90.0" stroke="#2563eb" stroke-width="4" marker-end="url(#arrow-blue)"/>
 <line x1="588.0" y1="300.0" x2="625.0" y2="300.0" stroke="#2563eb" stroke-width="4" marker-end="url(#arrow-blue)"/>
-<polyline points="110.0,195.0 215.0,195.0 215.0,300.0 320.0,300.0 425.0,300.0 425.0,195.0 425.0,300.0 530.0,300.0" fill="none" stroke="#ffffff" stroke-width="9" stroke-linecap="round" stroke-linejoin="round" opacity="0.95"/>
-<line x1="215.0" y1="195.0" x2="215.0" y2="90.0" stroke="#4488ff" stroke-width="5" stroke-dasharray="10 8" stroke-linecap="round"/>
-<rect x="206.0" y="81.0" width="18" height="18" fill="#4488ff" stroke="#ffffff" stroke-width="2" transform="rotate(45 215.0 90.0)"/>
-<line x1="425.0" y1="195.0" x2="425.0" y2="90.0" stroke="#4488ff" stroke-width="5" stroke-dasharray="10 8" stroke-linecap="round"/>
-<rect x="416.0" y="81.0" width="18" height="18" fill="#4488ff" stroke="#ffffff" stroke-width="2" transform="rotate(45 425.0 90.0)"/>
+<polyline points="110.0,195.0 215.0,195.0 215.0,90.0 320.0,90.0 425.0,90.0 425.0,195.0 425.0,90.0 530.0,90.0" fill="none" stroke="#ffffff" stroke-width="9" stroke-linecap="round" stroke-linejoin="round" opacity="0.95"/>
+<line x1="425.0" y1="195.0" x2="425.0" y2="300.0" stroke="#4488ff" stroke-width="5" stroke-dasharray="10 8" stroke-linecap="round"/>
+<rect x="416.0" y="291.0" width="18" height="18" fill="#4488ff" stroke="#ffffff" stroke-width="2" transform="rotate(45 425.0 300.0)"/>
 <circle cx="110.0" cy="195.0" r="17" fill="#ffffff" stroke="#14532d" stroke-width="2"/>
 <text x="110.0" y="200.0" font-size="14" font-family="sans-serif" font-weight="700" text-anchor="middle" fill="#14532d">S</text>
 <circle cx="215.0" cy="195.0" r="17" fill="#ffffff" stroke="#14532d" stroke-width="2"/>
 <text x="215.0" y="200.0" font-size="14" font-family="sans-serif" font-weight="700" text-anchor="middle" fill="#14532d">1</text>
-<circle cx="215.0" cy="300.0" r="17" fill="#ffffff" stroke="#14532d" stroke-width="2"/>
-<text x="215.0" y="305.0" font-size="14" font-family="sans-serif" font-weight="700" text-anchor="middle" fill="#14532d">2</text>
-<circle cx="320.0" cy="300.0" r="17" fill="#ffffff" stroke="#14532d" stroke-width="2"/>
-<text x="320.0" y="305.0" font-size="14" font-family="sans-serif" font-weight="700" text-anchor="middle" fill="#14532d">3</text>
-<circle cx="425.0" cy="300.0" r="17" fill="#ffffff" stroke="#14532d" stroke-width="2"/>
-<text x="425.0" y="305.0" font-size="14" font-family="sans-serif" font-weight="700" text-anchor="middle" fill="#14532d">4</text>
+<circle cx="215.0" cy="90.0" r="17" fill="#ffffff" stroke="#14532d" stroke-width="2"/>
+<text x="215.0" y="95.0" font-size="14" font-family="sans-serif" font-weight="700" text-anchor="middle" fill="#14532d">2</text>
+<circle cx="320.0" cy="90.0" r="17" fill="#ffffff" stroke="#14532d" stroke-width="2"/>
+<text x="320.0" y="95.0" font-size="14" font-family="sans-serif" font-weight="700" text-anchor="middle" fill="#14532d">3</text>
+<circle cx="425.0" cy="90.0" r="17" fill="#ffffff" stroke="#14532d" stroke-width="2"/>
+<text x="425.0" y="95.0" font-size="14" font-family="sans-serif" font-weight="700" text-anchor="middle" fill="#14532d">4</text>
 <circle cx="425.0" cy="195.0" r="17" fill="#ffffff" stroke="#14532d" stroke-width="2"/>
 <text x="425.0" y="200.0" font-size="14" font-family="sans-serif" font-weight="700" text-anchor="middle" fill="#14532d">5</text>
-<circle cx="425.0" cy="300.0" r="17" fill="#ffffff" stroke="#14532d" stroke-width="2"/>
-<text x="425.0" y="305.0" font-size="14" font-family="sans-serif" font-weight="700" text-anchor="middle" fill="#14532d">6</text>
-<circle cx="530.0" cy="300.0" r="17" fill="#ffffff" stroke="#14532d" stroke-width="2"/>
-<text x="530.0" y="305.0" font-size="14" font-family="sans-serif" font-weight="700" text-anchor="middle" fill="#14532d">E</text>
+<circle cx="425.0" cy="90.0" r="17" fill="#ffffff" stroke="#14532d" stroke-width="2"/>
+<text x="425.0" y="95.0" font-size="14" font-family="sans-serif" font-weight="700" text-anchor="middle" fill="#14532d">6</text>
+<circle cx="530.0" cy="90.0" r="17" fill="#ffffff" stroke="#14532d" stroke-width="2"/>
+<text x="530.0" y="95.0" font-size="14" font-family="sans-serif" font-weight="700" text-anchor="middle" fill="#14532d">E</text>
 <circle cx="110.0" cy="90.0" r="25" fill="#a8d8ff" stroke="#4488cc" stroke-width="3" opacity="0.9"/>
 <text x="110.0" y="95.0" font-size="16" font-family="sans-serif" font-weight="700" text-anchor="middle" fill="#111827">R1</text>
-<circle cx="110.0" cy="300.0" r="25" fill="#a8d8ff" stroke="#4488cc" stroke-width="3" opacity="0.9"/>
-<text x="110.0" y="305.0" font-size="16" font-family="sans-serif" font-weight="700" text-anchor="middle" fill="#111827">R1</text>
-<circle cx="215.0" cy="90.0" r="25" fill="#ff6666" stroke="#cc3333" stroke-width="3" opacity="0.9"/>
-<text x="215.0" y="95.0" font-size="16" font-family="sans-serif" font-weight="700" text-anchor="middle" fill="#111827">R2</text>
-<circle cx="215.0" cy="300.0" r="25" fill="#a8d8ff" stroke="#4488cc" stroke-width="3" opacity="0.9"/>
-<text x="215.0" y="305.0" font-size="16" font-family="sans-serif" font-weight="700" text-anchor="middle" fill="#111827">R1</text>
+<circle cx="215.0" cy="90.0" r="25" fill="#a8d8ff" stroke="#4488cc" stroke-width="3" opacity="0.9"/>
+<text x="215.0" y="95.0" font-size="16" font-family="sans-serif" font-weight="700" text-anchor="middle" fill="#111827">R1</text>
 <circle cx="320.0" cy="90.0" r="25" fill="#ff6666" stroke="#cc3333" stroke-width="3" opacity="0.9"/>
 <text x="320.0" y="95.0" font-size="16" font-family="sans-serif" font-weight="700" text-anchor="middle" fill="#111827">R2</text>
 <circle cx="320.0" cy="195.0" r="25" fill="#ffff66" stroke="#cccc33" stroke-width="3" opacity="0.9"/>
 <text x="320.0" y="200.0" font-size="16" font-family="sans-serif" font-weight="700" text-anchor="middle" fill="#111827">假</text>
-<circle cx="425.0" cy="90.0" r="25" fill="#ff6666" stroke="#cc3333" stroke-width="3" opacity="0.9"/>
-<text x="425.0" y="95.0" font-size="16" font-family="sans-serif" font-weight="700" text-anchor="middle" fill="#111827">R2</text>
+<circle cx="425.0" cy="300.0" r="25" fill="#ff6666" stroke="#cc3333" stroke-width="3" opacity="0.9"/>
+<text x="425.0" y="305.0" font-size="16" font-family="sans-serif" font-weight="700" text-anchor="middle" fill="#111827">R2</text>
 <rect x="30" y="468" width="18" height="18" fill="#006400" stroke="#111827"/>
 <text x="54" y="482" font-size="13" font-family="sans-serif" fill="#111827">h=20</text>
 <rect x="130" y="468" width="18" height="18" fill="#228B22" stroke="#111827"/>

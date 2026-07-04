@@ -53,9 +53,9 @@
 - `utils/race.py`：挑战赛规划核心，维护红/蓝 `pos_to_coord`、比赛数量模式、布局校验、Dijkstra 代价路径规划和可视化。
 - `utils/challenge_lib.py`：挑战赛对外入口，封装二维码解析、场外预吸取候选规划、入口/出口动作行、动作矩阵生成和后台 QR 扫描。
 - `utils/utils.py`：无 GUI 工具入口，可从 QR 或 KFS 字典生成动作矩阵；也保留对抗赛/旧梅林入口。
-- `utils/process.py`：二维码图像源、检测和 payload 校验。`image_source=1` 使用 RealSense D435i/D455 彩色流；打开时会打印设备名、序列号、固件和 USB 模式，默认先试 `640x480@30`，再 fallback 到 `848x480@30`、`1280x720@30`，预热阶段每帧 `5000ms` 超时并最多重试 `3` 次。D455 若枚举为 `USB=2.1`，`640x480@30` 可能首帧超时；应优先换到真正 USB3 链路。`image_source=2` 以 `RELIABLE` QoS 订阅 `/odin1/image/undistorted`，并将常见 ROS `Image` 编码转换为 BGR。Odin 首帧超过 `5s` 未到达时会报错并释放扫码锁，避免主流程永久等待；驱动配置必须启用 `sendrgbundistort: 1`。
+- `utils/process.py`：二维码图像源、检测和 payload 校验。`image_source=1` 使用 RealSense D435i/D455 彩色流；打开时会打印设备名、序列号、固件和 USB 模式，默认优先 `1280x720@30`，再 fallback 到 `848x480@30`、`640x480@30`，预热阶段每帧 `5000ms` 超时并最多重试 `3` 次。RealSense 彩色传感器默认关闭自动曝光并尝试设置 `exposure=120.0`、`gain=32.0`，不支持时只打印警告不中断。正式后台扫码线程使用和 `d455.py` 相同的实时策略：优先扫上一帧二维码 ROI，再扫全图原图/灰度，重型 CLAHE/Otsu/自适应阈值默认每 `30` 帧兜底一次，`full_detect=True` 时才在兜底帧加入 `2x/3x` 放大候选。D455 若枚举为 `USB=2.1`，高分辨率/首帧可能超时；应优先换到真正 USB3 链路。`image_source=2` 以 `RELIABLE` QoS 订阅 `/odin1/image/undistorted`，并将常见 ROS `Image` 编码转换为 BGR。Odin 首帧超过 `5s` 未到达时会报错并释放扫码锁，避免主流程永久等待；驱动配置必须启用 `sendrgbundistort: 1`。
 - `utils/route.py` / `utils/meilin.py`：旧梅林/对抗赛相关逻辑，非当前挑战赛主执行链路。
-- `d455.py`：独立 RealSense D455/D435i 二维码检测脚本，用后台线程模拟主流程扫码形态，默认 `640x480@30`、预热 `15` 帧、稳定 `5` 帧后输出结果，可用 `--no-window` 在 SSH 下关闭窗口。
+- `d455.py`：RealSense D455/D435i 二维码检测脚本，复用 `utils.process` 的相机打开、曝光设置、取帧、QR 识别和 ROI 逻辑；自身只保留子进程、窗口预览和结果队列封装。默认 `1280x720@30`、预热 `15` 帧、稳定 `2` 帧后输出结果；检测策略为实时扫码式：优先扫上一帧二维码 ROI，再扫全图原图/灰度，重型 CLAHE/Otsu/自适应阈值默认每 `30` 帧兜底一次，`--full-detect` 只允许在兜底帧加入 `2x/3x` 放大候选。默认关闭自动曝光并设置 `exposure=120.0`、`gain=32.0`，可用 `--auto-exposure`、`--color-exposure`、`--color-gain` 现场调参，用 `--no-window` 在 SSH 下关闭窗口。
 
 ## 主流程脚本
 
@@ -217,6 +217,7 @@ sender.set_cylinder_select(2)  # PF3
 
 - `set_channel_values(...)`：只修改传入通道，不复位其他通道。
 - `set_motion_channels(...)`：只修改 `ch0/ch2/ch3/des_yaw_i16`。
+- `frame_thread` 接收通道值时会把 `ch0/ch2` 统一缩放为原值的 `3/4` 后取整，再编入控制帧；其它通道不缩放。
 - `cylinder_select`：只接受 `0/1/2`；不传时保持当前发送线程里的值，默认初始值为 `0`。
 - `sender.set_safe_stop(...)`：恢复安全默认通道，只在明确需要全局复位时使用。
 
@@ -642,7 +643,7 @@ move.reset_weapon_after_fetch(sender)
 - V3 帧格式和新版上下楼触发语义已接入；旧 `place_kfs()` 和 `move.control_kfs_pose()` 已删除，放置动作当前使用 `kfs.place_kfs_pose()`、`kfs.sucker_release_pose()`、`kfs.release_kfs()` 和 `kfs.place_3rd_kfs()` 等新接口组合。
 - 方块模式 `cylinderSelect` 和四档 `ch9` 已有底层接口，普通双头吸取、场外 1/3 号侧吸和九宫格二/三层释放测试已接入；`compete_logic.rigion_3()` 已封装进入九宫格后的高分/大胜策略选择，但九宫格坐标仍需实测复核。
 - 侧吸的 pose5 `1.0s`、横移默认 `ch0=100,4s`、横移后 `0.5s`、收尾 pose3 默认 `3.0s` 都是时间等待，没有机械臂到位 ACK；侧吸、横移持物和并发回 `-1` 尚未完整实机验证。
-- RealSense D455 在小电脑上若日志显示 `USB=2.1`，即使插在标称 USB3 口也可能因实际链路降级导致 `Frame didn't arrive within 5000`；现场已确认恢复到 `USB=3.2` 后 `640x480@30` 彩色流可预热成功。后续排查以 `utils/process.py` 打印的 USB 模式和 `lsusb -t` 实际速率为准。
+- RealSense D455 在小电脑上若日志显示 `USB=2.1`，即使插在标称 USB3 口也可能因实际链路降级导致 `Frame didn't arrive within 5000`，高分辨率扫码更依赖稳定 USB3 链路。当前扫码默认优先 `1280x720@30`；后续排查以 `utils/process.py` 打印的 USB 模式和 `lsusb -t` 实际速率为准。
 - `challenge_lib` 场外规划成功后会在当前进程内将 R2 布局数和剩余抓取数各减 `1`；当前约定一次流程只进行一次成功规划。如后续支持多次规划，需要增加显式重置或局部规划上下文。
 - `execute_action_matrix()` 已在首个 `completed=False` 动作行停止并返回失败上下文；各主流入口会在矩阵失败后直接结束，不再继续赛后移动。当前仍无硬件 ACK，“成功”只能表示现有时间/位姿条件未报错。
 - 锁轮协议使用 `ch5=1,ch6=2` 配合 `ch7` 边沿触发；当前实现按上升沿进入、下降沿离开处理，切换到其他模式后的锁轮保持行为仍需实机确认。
@@ -675,8 +676,9 @@ move.reset_weapon_after_fetch(sender)
 - 已用模拟 sender/runtime 检查 `module.side_suck()` 四种目标/次数角度分派、气缸 -> 旋转 -> pose5 -> 吸取 -> 实时坐标横移 -> 等待 -> 收尾线程 -> 回 `-1` 的调用顺序。
 - 已对 `lib2/kfs.py` 新增 `kfs_suck_preparation()` 做语法检查；该方法复用已有 `_release_kfs_suction_with_lock(...keep_suction_on=True)` 打开并保持吸气，尚未做实机气缸联调。
 - 已将 `lib2/compete_logic.py::rigion_2_retry_plan(...)` 改为参数输入并做语法检查；调用方需要显式传入 `r1_count`、`r2_count`、`required_r2_pickup_count` 和 `qr_string`，不再等待终端录入。
-- 已将 `utils/process.py` 的 RealSense 打开流程改为设备枚举、候选流 fallback 和 warmup 重试；已用现场日志确认 `USB=2.1` 时 D455 可能首帧超时，`USB=3.2` 时 `640x480@30` 可预热成功。
-- 已新增 `d455.py` 独立后台线程式二维码测试脚本，用于区分 RealSense 取流、OpenCV 窗口和主流程扫码问题。
+- 已将 `utils/process.py` 的 RealSense 打开流程改为设备枚举、候选流 fallback 和 warmup 重试；当前默认优先 `1280x720@30`，fallback 到 `848x480@30`、`640x480@30`，并在预热前尝试配置彩色传感器手动曝光/增益。已用现场日志确认 `USB=2.1` 时 D455 可能首帧超时，`USB=3.2` 时彩色流可预热成功。
+- 已将 `utils/process.py` 和 `d455.py` 的 QR 识别改为 LCD 屏幕二维码优先的多候选识别：原图、灰度、CLAHE、Otsu、反色、自适应阈值和 `2x/3x` 放大候选；该优化尚需在当前 7 寸 LCD 场景下实机复核帧率和识别率。
+- 已将 `d455.py` 改为进程式二维码测试脚本，用于区分 RealSense 取流、OpenCV 窗口和主流程扫码问题；可通过 `--color-exposure`、`--color-gain` 和 `--auto-exposure` 现场调参。
 - 已检查比赛模式 1/2、KFS 数量校验、场外 1/2/3 号候选规划，以及“无场外吸取时入口行在第一行，有场外吸取时在第二行”的矩阵顺序。
 - 已用模拟行结果检查 `execute_action_matrix()` 的全部成功、首行失败即停止、`stop_on_failed=False` 继续执行三种路径；失败行索引、原因和已执行行数均符合预期。
 - 已对本轮涉及的 `ultimate_test_script.py`、`lib2/tools.py`、`lib2/module.py`、`lib2/move.py` 做过语法检查；顶层恢复初态菜单、角度坐标修正、梅林行执行修正和九宫格 `180deg` 修正尚需实机复核。

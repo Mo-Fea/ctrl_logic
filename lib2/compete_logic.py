@@ -1,4 +1,5 @@
 import queue
+import threading
 import time
 
 from lib2 import module
@@ -41,6 +42,23 @@ def _wait_until_lock_held(lock, timeout_sec=1.0, poll_interval_sec=0.01):
             continue
         return True
     return False
+
+
+def _monitor_qr_scanner_detection(scanner, stop_event, poll_interval_sec=0.05):
+    last_printed_data = None
+    while not stop_event.is_set():
+        data = scanner.last_qr_data
+        if data and data != last_printed_data:
+            detect_path = getattr(scanner, "last_detect_path", None)
+            stable_count = getattr(scanner, "last_stable_count", 0)
+            print(
+                "[QR识别线程]: 已识别到二维码 "
+                f"data={data!r}, stable_count={stable_count}, path={detect_path}"
+            )
+            last_printed_data = data
+        if scanner.done_event.is_set():
+            break
+        time.sleep(float(poll_interval_sec))
 
 
 def rigion_2_retry_plan(
@@ -278,13 +296,14 @@ def rigion_1(
     odom_runtime,
     weapon_id=4,
     image_source=1,
-    stable_frame_count=5,
+    stable_frame_count=2,
     show_window=False,
     scanner_start_timeout_sec=1.0,
     scanner_release_timeout_sec=None,
     fetch_weapon_kwargs=None,
     lock_wheel_kwargs=None,
     unlock_wheel_kwargs=None,
+    weapon_down_kwargs=None,
     weapon_loose_kwargs=None,
     final_wait_sec=5.0,
     action_matrix_queue=None,
@@ -306,6 +325,9 @@ def rigion_1(
     )
     unlock_wheel_kwargs = (
         {} if unlock_wheel_kwargs is None else dict(unlock_wheel_kwargs)
+    )
+    weapon_down_kwargs = (
+        {} if weapon_down_kwargs is None else dict(weapon_down_kwargs)
     )
     weapon_loose_kwargs = (
         {} if weapon_loose_kwargs is None else dict(weapon_loose_kwargs)
@@ -341,7 +363,18 @@ def rigion_1(
             "action_matrix_queue": action_matrix_queue,
         }
 
+    qr_print_stop_event = threading.Event()
+    qr_print_thread = threading.Thread(
+        target=_monitor_qr_scanner_detection,
+        args=(scanner, qr_print_stop_event),
+        daemon=True,
+        name="challenge_qr_detection_print",
+    )
+    qr_print_thread.start()
+
     fetch_result = None
+    initial_weapon_loose_result = None
+    weapon_down_result = None
     lock_result = None
     unlock_result = None
     weapon_loose_result = None
@@ -350,6 +383,46 @@ def rigion_1(
     final_wait_completed = False
 
     try:
+        initial_weapon_loose_result = weapon.weapon_loose(
+            sender,
+            **weapon_loose_kwargs,
+        )
+        if not initial_weapon_loose_result.get("completed", False):
+            return {
+                "completed": False,
+                "failed_step": "weapon_loose_after_scanner_lock",
+                "weapon_id": int(weapon_id),
+                "scanner": scanner,
+                "scanner_lock_started": bool(scanner_lock_started),
+                "initial_weapon_loose_result": initial_weapon_loose_result,
+                "weapon_down_result": weapon_down_result,
+                "fetch_result": fetch_result,
+                "lock_result": lock_result,
+                "qr_wait_result": qr_wait_result,
+                "action_matrix": action_matrix,
+                "action_matrix_queue": action_matrix_queue,
+            }
+
+        weapon_down_result = weapon.weapon_down(
+            sender,
+            **weapon_down_kwargs,
+        )
+        if not weapon_down_result.get("completed", False):
+            return {
+                "completed": False,
+                "failed_step": "weapon_down_after_scanner_lock",
+                "weapon_id": int(weapon_id),
+                "scanner": scanner,
+                "scanner_lock_started": bool(scanner_lock_started),
+                "initial_weapon_loose_result": initial_weapon_loose_result,
+                "weapon_down_result": weapon_down_result,
+                "fetch_result": fetch_result,
+                "lock_result": lock_result,
+                "qr_wait_result": qr_wait_result,
+                "action_matrix": action_matrix,
+                "action_matrix_queue": action_matrix_queue,
+            }
+
         fetch_result = module.fetch_weapon(
             sender=sender,
             position_runtime=position_runtime,
@@ -365,6 +438,8 @@ def rigion_1(
                 "weapon_id": int(weapon_id),
                 "scanner": scanner,
                 "scanner_lock_started": bool(scanner_lock_started),
+                "initial_weapon_loose_result": initial_weapon_loose_result,
+                "weapon_down_result": weapon_down_result,
                 "fetch_result": fetch_result,
                 "lock_result": lock_result,
                 "qr_wait_result": qr_wait_result,
@@ -380,6 +455,8 @@ def rigion_1(
                 "weapon_id": int(weapon_id),
                 "scanner": scanner,
                 "scanner_lock_started": bool(scanner_lock_started),
+                "initial_weapon_loose_result": initial_weapon_loose_result,
+                "weapon_down_result": weapon_down_result,
                 "fetch_result": fetch_result,
                 "lock_result": lock_result,
                 "qr_wait_result": qr_wait_result,
@@ -397,6 +474,8 @@ def rigion_1(
                 "weapon_id": int(weapon_id),
                 "scanner": scanner,
                 "scanner_lock_started": bool(scanner_lock_started),
+                "initial_weapon_loose_result": initial_weapon_loose_result,
+                "weapon_down_result": weapon_down_result,
                 "fetch_result": fetch_result,
                 "lock_result": lock_result,
                 "qr_wait_result": qr_wait_result,
@@ -415,6 +494,8 @@ def rigion_1(
                 "weapon_id": int(weapon_id),
                 "scanner": scanner,
                 "scanner_lock_started": bool(scanner_lock_started),
+                "initial_weapon_loose_result": initial_weapon_loose_result,
+                "weapon_down_result": weapon_down_result,
                 "fetch_result": fetch_result,
                 "lock_result": lock_result,
                 "qr_wait_result": qr_wait_result,
@@ -434,6 +515,8 @@ def rigion_1(
                 "weapon_id": int(weapon_id),
                 "scanner": scanner,
                 "scanner_lock_started": bool(scanner_lock_started),
+                "initial_weapon_loose_result": initial_weapon_loose_result,
+                "weapon_down_result": weapon_down_result,
                 "fetch_result": fetch_result,
                 "lock_result": lock_result,
                 "qr_wait_result": qr_wait_result,
@@ -452,6 +535,8 @@ def rigion_1(
             "weapon_id": int(weapon_id),
             "scanner": scanner,
             "scanner_lock_started": bool(scanner_lock_started),
+            "initial_weapon_loose_result": initial_weapon_loose_result,
+            "weapon_down_result": weapon_down_result,
             "fetch_result": fetch_result,
             "lock_result": lock_result,
             "qr_wait_result": qr_wait_result,
@@ -464,9 +549,11 @@ def rigion_1(
             "final_wait_completed": bool(final_wait_completed),
         }
     finally:
+        qr_print_stop_event.set()
         if not qr_wait_result:
             scanner.stop()
         scanner.join(timeout=1.0)
+        qr_print_thread.join(timeout=0.5)
 
 
 def rigion_3(

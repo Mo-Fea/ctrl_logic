@@ -10,7 +10,7 @@ position_lib = position_backend.get_position_backend()
 
 
 # 最终方向到达阈值，当前 yaw 与目标 yaw 的误差小于该值后认为旋转到位，单位 deg。
-DEFAULT_DIRECTION_THRESHOLD_DEG = 3.0
+DEFAULT_DIRECTION_THRESHOLD_DEG = 2.0
 # 默认 yaw 到达阈值；旋转和最终方向检测默认共用 DEFAULT_DIRECTION_THRESHOLD_DEG。
 DEFAULT_YAW_TOLERANCE_DEG = DEFAULT_DIRECTION_THRESHOLD_DEG
 # 方向到达后需要连续保持在阈值内的时间，单位 s；用于避免刚进阈值就退出后又过冲。
@@ -37,6 +37,12 @@ DEFAULT_YAW_PREDICTION_CONTROL_DELAY_SEC = 1.0 / 70.0
 DEFAULT_YAW_PREDICTION_MAX_DT_SEC = 0.10
 # 定时通道运动和上台阶等待循环周期，单位 s。
 DEFAULT_DRIVE_LOOP_INTERVAL_SEC = 0.02
+# 碰撞移动：先要求速度曾超过该阈值，单位 m/s。
+DEFAULT_COLLISION_SPEED_FLOOR_MPS = 0.05
+# 碰撞移动：速度降到该阈值及以下认为接近 0，单位 m/s。
+DEFAULT_COLLISION_STOP_SPEED_MPS = 0.02
+# 碰撞移动：接近 0 需要连续确认的帧数。
+DEFAULT_COLLISION_CONFIRM_FRAME_COUNT = 5
 # 移动到点主控制循环周期，单位 s。
 DEFAULT_MOVE_LOOP_INTERVAL_SEC = 0.02
 # 移动/位置保持闭环可接受的 odom 最大年龄，超过后不再使用角速度做 yaw 预测。
@@ -78,7 +84,7 @@ DEFAULT_OVERSHOOT_CHECK_DISTANCE = 0.15
 # 连续多少帧满足过点检测后锁定为已经冲过目标点。
 DEFAULT_OVERSHOOT_CONFIRM_COUNT = 3
 # 到点距离阈值，距离小于该值后认为位置满足到点条件，单位 m。
-DEFAULT_STOP_DISTANCE = 0.02
+DEFAULT_STOP_DISTANCE = 0.05
 # 到点速度阈值，平面线速度小于该值后认为速度足够低，单位 m/s。
 DEFAULT_REACHED_SPEED_MPS = 0.05
 # 到点 yaw 角速度阈值，角速度小于该值后认为旋转足够稳定，单位 rad/s。
@@ -102,7 +108,7 @@ DEFAULT_CLIMB_TRIGGER_HOLD_SEC = 0.3
 # 上楼梯触发前用于形成 1 -> 3 上升沿的预置时间，单位 s。
 DEFAULT_CLIMB_TRIGGER_ARM_SEC = 0.1
 # 上楼梯触发完成后的固定等待时间，单位 s。
-DEFAULT_CLIMB_POST_TRIGGER_DELAY_SEC = 3.7
+DEFAULT_CLIMB_POST_TRIGGER_DELAY_SEC = 3.2
 # 上楼梯流程最大允许时间，超过该时间后打印错误并终止程序，单位 s。
 DEFAULT_CLIMB_TIMEOUT_SEC = 15.0
 # 下楼梯触发通道保持时间，单位 s。
@@ -148,14 +154,14 @@ def _get_corrected_battlefield_coordinate(position_lib_module, coordinate_name):
         )
 
     raw_x, raw_y = getattr(position_lib_module, coordinate_name)
-    corrected_x, corrected_y = tools.deg180_correction(raw_x, raw_y)
     return {
         "coordinate_name": coordinate_name,
         "raw_x": float(raw_x),
         "raw_y": float(raw_y),
-        "x": float(corrected_x),
-        "y": float(corrected_y),
-        "correction_yaw_deg": 180.0,
+        "x": float(raw_x),
+        "y": float(raw_y),
+        "correction_yaw_deg": 0.0,
+        "coordinate_correction_applied": False,
     }
 
 
@@ -756,10 +762,12 @@ def _drive_till_collision(
     value,
     channel_index,
     channel_name,
-    collision_speed_floor_mps=0.2,
-    confirm_frame_count=5,
+    collision_speed_floor_mps=DEFAULT_COLLISION_SPEED_FLOOR_MPS,
+    collision_stop_speed_mps=DEFAULT_COLLISION_STOP_SPEED_MPS,
+    confirm_frame_count=DEFAULT_COLLISION_CONFIRM_FRAME_COUNT,
     loop_interval_sec=DEFAULT_DRIVE_LOOP_INTERVAL_SEC,
     odom_max_age_sec=DEFAULT_ODOM_MAX_AGE_SEC,
+    target_yaw_deg=None,
 ):
     try:
         direction = int(direction)
@@ -771,8 +779,8 @@ def _drive_till_collision(
 
     if direction not in (-1, 1):
         raise ValueError(f"direction must be -1 or 1, got {direction}")
-    if value <= 0 or value > 600:
-        raise ValueError(f"value must be in 1..600, got {value}")
+    if value <= 0 or value > 800:
+        raise ValueError(f"value must be in 1..800, got {value}")
 
     confirm_frame_count = int(confirm_frame_count)
     if confirm_frame_count <= 0:
@@ -790,8 +798,19 @@ def _drive_till_collision(
             "collision_speed_floor_mps must be >= 0, "
             f"got {collision_speed_floor_mps}"
         )
+    collision_stop_speed_mps = float(collision_stop_speed_mps)
+    if collision_stop_speed_mps < 0.0:
+        raise ValueError(
+            "collision_stop_speed_mps must be >= 0, "
+            f"got {collision_stop_speed_mps}"
+        )
 
     channel_value = direction * abs(value)
+    des_yaw_i16 = None
+    normalized_target_yaw_deg = None
+    if target_yaw_deg is not None:
+        normalized_target_yaw_deg = normalize_yaw_deg(float(target_yaw_deg))
+        des_yaw_i16 = encode_target_yaw_i16(normalized_target_yaw_deg)
     max_velocity = 0.0
     confirm_count = 0
     valid_frame_count = 0
@@ -804,6 +823,7 @@ def _drive_till_collision(
             channels = set_channel_values(
                 sender,
                 channel_values={int(channel_index): int(channel_value)},
+                des_yaw_i16=des_yaw_i16,
             )
 
             current_speed_mps = _get_odometry_speed_scalar(
@@ -820,9 +840,8 @@ def _drive_till_collision(
                 max_velocity = latest_speed_mps
 
             collision_detected = (
-                max_velocity >= collision_speed_floor_mps
-                and (max_velocity - latest_speed_mps)
-                > (max_velocity - collision_speed_floor_mps)
+                max_velocity > collision_speed_floor_mps
+                and latest_speed_mps <= collision_stop_speed_mps
             )
             if collision_detected:
                 confirm_count += 1
@@ -837,6 +856,7 @@ def _drive_till_collision(
         stop_channels = set_channel_values(
             sender,
             channel_values={int(channel_index): 0},
+            des_yaw_i16=des_yaw_i16,
         )
 
     return {
@@ -849,7 +869,10 @@ def _drive_till_collision(
         "max_velocity_mps": float(max_velocity),
         "latest_speed_mps": latest_speed_mps,
         "collision_speed_floor_mps": float(collision_speed_floor_mps),
+        "collision_stop_speed_mps": float(collision_stop_speed_mps),
         "confirm_frame_count": int(confirm_frame_count),
+        "target_yaw_deg": normalized_target_yaw_deg,
+        "des_yaw_i16": des_yaw_i16,
         "valid_frame_count": int(valid_frame_count),
         "channels": channels,
         "stop_channels": stop_channels,
@@ -861,13 +884,15 @@ def fb_till_collision(
     odom_runtime,
     direction,
     value,
-    collision_speed_floor_mps=0.2,
-    confirm_frame_count=5,
+    collision_speed_floor_mps=DEFAULT_COLLISION_SPEED_FLOOR_MPS,
+    collision_stop_speed_mps=DEFAULT_COLLISION_STOP_SPEED_MPS,
+    confirm_frame_count=DEFAULT_COLLISION_CONFIRM_FRAME_COUNT,
     loop_interval_sec=DEFAULT_DRIVE_LOOP_INTERVAL_SEC,
     odom_max_age_sec=DEFAULT_ODOM_MAX_AGE_SEC,
+    target_yaw_deg=None,
 ):
     """
-    前后方向持续运动直到速度标量跌回阈值，direction=1 前进，-1 后退。
+    前后方向持续运动，直到速度曾超过阈值后接近 0，direction=1 前进，-1 后退。
     """
     return _drive_till_collision(
         sender=sender,
@@ -877,9 +902,11 @@ def fb_till_collision(
         channel_index=2,
         channel_name="ch2",
         collision_speed_floor_mps=collision_speed_floor_mps,
+        collision_stop_speed_mps=collision_stop_speed_mps,
         confirm_frame_count=confirm_frame_count,
         loop_interval_sec=loop_interval_sec,
         odom_max_age_sec=odom_max_age_sec,
+        target_yaw_deg=target_yaw_deg,
     )
 
 
@@ -888,13 +915,15 @@ def lr_till_collision(
     odom_runtime,
     direction,
     value,
-    collision_speed_floor_mps=0.2,
-    confirm_frame_count=5,
+    collision_speed_floor_mps=DEFAULT_COLLISION_SPEED_FLOOR_MPS,
+    collision_stop_speed_mps=DEFAULT_COLLISION_STOP_SPEED_MPS,
+    confirm_frame_count=DEFAULT_COLLISION_CONFIRM_FRAME_COUNT,
     loop_interval_sec=DEFAULT_DRIVE_LOOP_INTERVAL_SEC,
     odom_max_age_sec=DEFAULT_ODOM_MAX_AGE_SEC,
+    target_yaw_deg=None,
 ):
     """
-    左右方向持续运动直到速度标量跌回阈值，direction=1 右移，-1 左移。
+    左右方向持续运动，直到速度曾超过阈值后接近 0，direction=1 右移，-1 左移。
     """
     return _drive_till_collision(
         sender=sender,
@@ -904,9 +933,11 @@ def lr_till_collision(
         channel_index=0,
         channel_name="ch0",
         collision_speed_floor_mps=collision_speed_floor_mps,
+        collision_stop_speed_mps=collision_stop_speed_mps,
         confirm_frame_count=confirm_frame_count,
         loop_interval_sec=loop_interval_sec,
         odom_max_age_sec=odom_max_age_sec,
+        target_yaw_deg=target_yaw_deg,
     )
 
 
@@ -915,8 +946,9 @@ def _till_collision(
     odom_runtime,
     direction,
     value,
-    collision_speed_floor_mps=0.2,
-    confirm_frame_count=5,
+    collision_speed_floor_mps=DEFAULT_COLLISION_SPEED_FLOOR_MPS,
+    collision_stop_speed_mps=DEFAULT_COLLISION_STOP_SPEED_MPS,
+    confirm_frame_count=DEFAULT_COLLISION_CONFIRM_FRAME_COUNT,
     loop_interval_sec=DEFAULT_DRIVE_LOOP_INTERVAL_SEC,
     odom_max_age_sec=DEFAULT_ODOM_MAX_AGE_SEC,
 ):
@@ -926,6 +958,7 @@ def _till_collision(
         direction=direction,
         value=value,
         collision_speed_floor_mps=collision_speed_floor_mps,
+        collision_stop_speed_mps=collision_stop_speed_mps,
         confirm_frame_count=confirm_frame_count,
         loop_interval_sec=loop_interval_sec,
         odom_max_age_sec=odom_max_age_sec,
@@ -1181,17 +1214,14 @@ def move_to_2rd_place(
       - 蓝半场读取 position 后端的 column2_blue。
 
     目标方向：
-      - 红蓝半场都以 180deg 方向移动。
-      - 按当前四方向映射，红场 180deg 对应 direction=2；
-        蓝场 180deg 对应 direction=3。
+      - 红蓝半场都以 180deg 方向移动，对应 direction=2。
     """
     current_position_lib = position_resource.get_position_lib()
     if position_backend.is_blue_field():
         coordinate_name = "column2_blue"
-        target_direction = 3
     else:
         coordinate_name = "column2_red"
-        target_direction = 2
+    target_direction = 2
 
     target = _get_corrected_battlefield_coordinate(
         current_position_lib,
@@ -1264,6 +1294,7 @@ def enter_battlefield(
     position_runtime,
     odom_runtime,
     cruise_forward_cmd=DEFAULT_MOVE_FORWARD_CMD,
+    collision_forward_cmd=800,
     timeout_sec=None,
     reference="robot",
     **kwargs,
@@ -1271,25 +1302,23 @@ def enter_battlefield(
     """
     进入九宫格/战场区域。
 
-    红蓝半场流程相同，均保持 180deg 航向依次移动：
-      1. pre_entrance9_<red/blue>
-      2. entrance9_<red/blue>
+    流程：
+      1. 以 90deg 移动到 pre_entrance9_<red/blue>
+      2. 保持该目标角，ch2=800 前进直到碰撞
+      3. 以 180deg 移动到 entrance9_<red/blue>
 
-    坐标按当前半场从 position 后端选择，航向按方向码转换：
-      - 红场 direction=2 -> 180deg
-      - 蓝场 direction=3 -> 180deg
+    坐标按当前半场从 position 后端选择。
     """
     current_position_lib = position_resource.get_position_lib()
     if position_backend.is_blue_field():
         pre_coordinate_name = "pre_entrance9_blue"
         entrance_coordinate_name = "entrance9_blue"
         field_name = "blue"
-        target_direction = 3
     else:
         pre_coordinate_name = "pre_entrance9_red"
         entrance_coordinate_name = "entrance9_red"
         field_name = "red"
-        target_direction = 2
+    pre_target_yaw_deg = 90.0
 
     pre_target = _get_corrected_battlefield_coordinate(
         current_position_lib,
@@ -1303,7 +1332,7 @@ def enter_battlefield(
     pre_target_y = pre_target["y"]
     entrance_target_x = entrance_target["x"]
     entrance_target_y = entrance_target["y"]
-    target_yaw_deg = tools.direction_int_to_yaw_deg(target_direction)
+    entrance_target_yaw_deg = 180.0
 
     pre_move_result = move_to_target(
         sender=sender,
@@ -1311,7 +1340,7 @@ def enter_battlefield(
         odom_runtime=odom_runtime,
         target_x=pre_target_x,
         target_y=pre_target_y,
-        final_target_yaw_deg=target_yaw_deg,
+        final_target_yaw_deg=pre_target_yaw_deg,
         cruise_forward_cmd=cruise_forward_cmd,
         timeout_sec=timeout_sec,
         reference=reference,
@@ -1325,8 +1354,8 @@ def enter_battlefield(
             "completed": False,
             "failed_step": "move_to_pre_entrance9",
             "field_name": field_name,
-            "target_direction": int(target_direction),
-            "target_yaw_deg": float(target_yaw_deg),
+            "pre_target_yaw_deg": float(pre_target_yaw_deg),
+            "entrance_target_yaw_deg": float(entrance_target_yaw_deg),
             "pre_target": {
                 "coordinate_name": pre_coordinate_name,
                 "raw_x": float(pre_target["raw_x"]),
@@ -1344,6 +1373,50 @@ def enter_battlefield(
                 "correction_yaw_deg": float(entrance_target["correction_yaw_deg"]),
             },
             "pre_move_result": pre_move_result,
+            "collision_result": None,
+            "entrance_move_result": None,
+        }
+
+    set_motion_channels(
+        sender,
+        des_yaw_i16=encode_target_yaw_i16(pre_target_yaw_deg),
+    )
+    collision_result = fb_till_collision(
+        sender=sender,
+        odom_runtime=odom_runtime,
+        direction=1,
+        value=collision_forward_cmd,
+    )
+    collision_completed = bool(
+        collision_result is not None
+        and collision_result.get("completed", False)
+    )
+    if not collision_completed:
+        return {
+            "completed": False,
+            "failed_step": "pre_entrance9_collision",
+            "field_name": field_name,
+            "pre_target_yaw_deg": float(pre_target_yaw_deg),
+            "entrance_target_yaw_deg": float(entrance_target_yaw_deg),
+            "collision_forward_cmd": int(collision_forward_cmd),
+            "pre_target": {
+                "coordinate_name": pre_coordinate_name,
+                "raw_x": float(pre_target["raw_x"]),
+                "raw_y": float(pre_target["raw_y"]),
+                "x": float(pre_target_x),
+                "y": float(pre_target_y),
+                "correction_yaw_deg": float(pre_target["correction_yaw_deg"]),
+            },
+            "entrance_target": {
+                "coordinate_name": entrance_coordinate_name,
+                "raw_x": float(entrance_target["raw_x"]),
+                "raw_y": float(entrance_target["raw_y"]),
+                "x": float(entrance_target_x),
+                "y": float(entrance_target_y),
+                "correction_yaw_deg": float(entrance_target["correction_yaw_deg"]),
+            },
+            "pre_move_result": pre_move_result,
+            "collision_result": collision_result,
             "entrance_move_result": None,
         }
 
@@ -1353,7 +1426,7 @@ def enter_battlefield(
         odom_runtime=odom_runtime,
         target_x=entrance_target_x,
         target_y=entrance_target_y,
-        final_target_yaw_deg=target_yaw_deg,
+        final_target_yaw_deg=entrance_target_yaw_deg,
         cruise_forward_cmd=cruise_forward_cmd,
         timeout_sec=timeout_sec,
         reference=reference,
@@ -1367,8 +1440,9 @@ def enter_battlefield(
         "completed": bool(entrance_completed),
         "failed_step": None if entrance_completed else "move_to_entrance9",
         "field_name": field_name,
-        "target_direction": int(target_direction),
-        "target_yaw_deg": float(target_yaw_deg),
+        "pre_target_yaw_deg": float(pre_target_yaw_deg),
+        "entrance_target_yaw_deg": float(entrance_target_yaw_deg),
+        "collision_forward_cmd": int(collision_forward_cmd),
         "pre_target": {
             "coordinate_name": pre_coordinate_name,
             "raw_x": float(pre_target["raw_x"]),
@@ -1386,6 +1460,7 @@ def enter_battlefield(
             "correction_yaw_deg": float(entrance_target["correction_yaw_deg"]),
         },
         "pre_move_result": pre_move_result,
+        "collision_result": collision_result,
         "entrance_move_result": entrance_move_result,
     }
 
@@ -1406,19 +1481,16 @@ def climb_R1_movement(
       1. pre_climb_R2_<red/blue>
       2. climb_R2_<red/blue>
 
-    180deg 不直接写死，按当前四方向映射转换：
-      - 红场 direction=2 -> 180deg
-      - 蓝场 direction=3 -> 180deg
+    180deg 不直接写死，按统一四方向映射 direction=2 转换。
     """
     current_position_lib = position_resource.get_position_lib()
     if position_backend.is_blue_field():
         pre_coordinate_name = "pre_climb_R2_blue"
         climb_coordinate_name = "climb_R2_blue"
-        target_direction = 3
     else:
         pre_coordinate_name = "pre_climb_R2_red"
         climb_coordinate_name = "climb_R2_red"
-        target_direction = 2
+    target_direction = 2
 
     pre_target = _get_corrected_battlefield_coordinate(
         current_position_lib,
@@ -1522,7 +1594,7 @@ def side_suck_movement(
     position_runtime,
     odom_runtime,
     target_stair_id,
-    lateral_distance=0.5,
+    lateral_distance=0.6,
     cruise_forward_cmd=DEFAULT_MOVE_FORWARD_CMD,
     adjust_forward_cmd=300,
     adjust_duration_sec=1.0,
@@ -1539,15 +1611,13 @@ def side_suck_movement(
     移动逻辑：
       - 先读取当前半场编号 -1 台阶坐标。
       - target_stair_id=1:
-          红场移动到 (x - 0.5, y)，蓝场移动到 (x + 0.5, y)。
+          移动到 (x - 0.6, y)。
       - target_stair_id=3:
-          红场移动到 (x + 0.5, y)，蓝场移动到 (x - 0.5, y)。
-      - 红场目标角度为 90deg，蓝场目标角度为 -90deg。
+          移动到 (x + 0.6, y)。
+      - 目标角度为 90deg。
       - 到侧吸预备点后，以 ch2=300 前进 1s。
 
-    90/-90 不直接写死，按当前四方向映射转换：
-      - 红场 direction=1 -> 90deg
-      - 蓝场 direction=4 -> -90deg
+    90deg 不直接写死，按统一四方向映射 direction=1 转换。
     """
     target_stair_id = int(target_stair_id)
     if target_stair_id not in (1, 3):
@@ -1555,20 +1625,18 @@ def side_suck_movement(
             f"target_stair_id must be 1 or 3, got {target_stair_id}"
         )
 
-    base_x, base_y = position_resource.get_stair_xy(-1)
-    lateral_distance = abs(float(lateral_distance))
+    target_direction = 1
+    lateral_sign = -1 if target_stair_id == 1 else 1
 
-    is_blue_field = position_backend.is_blue_field()
-    if is_blue_field:
-        target_direction = 4
-        lateral_sign = 1 if target_stair_id == 1 else -1
-    else:
-        target_direction = 1
-        lateral_sign = -1 if target_stair_id == 1 else 1
+    target_yaw_deg = tools.direction_int_to_yaw_deg(target_direction)
+    base_x, base_y = position_resource.get_stair_xy_for_angle(
+        -1,
+        target_yaw_deg,
+    )
+    lateral_distance = abs(float(lateral_distance))
 
     target_x = float(base_x) + float(lateral_sign) * lateral_distance
     target_y = float(base_y)
-    target_yaw_deg = tools.direction_int_to_yaw_deg(target_direction)
 
     side_move_result = move_to_target(
         sender=sender,
@@ -1630,6 +1698,7 @@ def side_suck_movement(
         "lateral_sign": int(lateral_sign),
         "adjust_forward_cmd": int(adjust_forward_cmd),
         "adjust_duration_sec": float(adjust_duration_sec),
+        "adjust_until_collision": False,
         "side_move_result": side_move_result,
         "adjust_drive_result": adjust_drive_result,
     }
@@ -1650,7 +1719,6 @@ def side_suck_lateral_movement(
       - 1: 向左平移。
       - 3: 向右平移。
 
-    红蓝半场当前逻辑一致，不反向。
     默认平移通道绝对值和时间由全局量控制：
       - DEFAULT_SIDE_SUCK_LATERAL_CMD_ABS
       - DEFAULT_SIDE_SUCK_LATERAL_DURATION_SEC
@@ -1795,6 +1863,11 @@ def move_to_target(
         max_cmd = DEFAULT_MOVE_FORWARD_CMD
     position_hold_kp = float(position_hold_kp)
     result = None
+    weapon_speed_stop_armed = False
+    weapon_speed_stop_confirm_count = 0
+    weapon_speed_stop_arm_mps = 0.1
+    weapon_speed_stop_trigger_mps = 0.02
+    weapon_speed_stop_required_count = 3
 
     while True:
         robot_pose = position_runtime.get_robot_pose()
@@ -1959,9 +2032,36 @@ def move_to_target(
                     "derivative": 0.0,
                 },
                 "channels": channels,
+                "weapon_speed_stop_armed": bool(weapon_speed_stop_armed),
+                "weapon_speed_stop_confirm_count": int(weapon_speed_stop_confirm_count),
+                "weapon_speed_stop_arm_mps": float(weapon_speed_stop_arm_mps),
+                "weapon_speed_stop_trigger_mps": float(weapon_speed_stop_trigger_mps),
             })
 
-            if result["reached"]:
+            if reference == "weapon" and odometry_fresh:
+                if linear_speed_mps > weapon_speed_stop_arm_mps:
+                    weapon_speed_stop_armed = True
+                    weapon_speed_stop_confirm_count = 0
+                elif (
+                    weapon_speed_stop_armed
+                    and linear_speed_mps <= weapon_speed_stop_trigger_mps
+                ):
+                    weapon_speed_stop_confirm_count += 1
+                elif weapon_speed_stop_armed:
+                    weapon_speed_stop_confirm_count = 0
+                result["weapon_speed_stop_armed"] = bool(weapon_speed_stop_armed)
+                result["weapon_speed_stop_confirm_count"] = int(
+                    weapon_speed_stop_confirm_count
+                )
+
+            completed_by_weapon_speed_stop = bool(
+                reference == "weapon"
+                and odometry_fresh
+                and weapon_speed_stop_armed
+                and weapon_speed_stop_confirm_count >= weapon_speed_stop_required_count
+            )
+
+            if result["reached"] or completed_by_weapon_speed_stop:
                 final_des_yaw_i16 = (
                     0
                     if final_target_yaw_deg is None
@@ -1983,6 +2083,12 @@ def move_to_target(
                     ),
                     "des_yaw_i16": int(final_des_yaw_i16),
                     "completed_by_overshoot_lock": False,
+                    "completed_by_weapon_speed_stop": bool(
+                        completed_by_weapon_speed_stop
+                    ),
+                    "weapon_speed_stop_required_count": int(
+                        weapon_speed_stop_required_count
+                    ),
                     "completed": True,
                 })
                 return result
