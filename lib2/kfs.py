@@ -429,6 +429,27 @@ def place_3rd_kfs_pose(
     )
 
 
+def level_pose(
+    sender,
+    arm_sec=0.1,
+    fire_sec=0.4,
+    loop_interval_sec=0.02,
+):
+    """
+    KFS 水平姿态：pose_id=7，即 ch5=2/ch6=7。
+
+    触发和复位逻辑与其他机械臂姿态控制一致，只控制 ch5/ch6/ch7，
+    不修改吸盘 ch4。
+    """
+    return _trigger_kfs_pose_with_lock(
+        sender=sender,
+        pose_id=7,
+        arm_sec=arm_sec,
+        fire_sec=fire_sec,
+        loop_interval_sec=loop_interval_sec,
+    )
+
+
 def kfs_side_pose(
     sender,
     arm_sec=0.1,
@@ -520,29 +541,38 @@ def release_kfs(sender):
     """
     按吸取的逆序释放一个 KFS。
 
-    先将全局 suck_count 减 1，再用减后的值选择对应气缸：
+    按进入函数时的 suck_count 选择待释放气缸：
+      3 -> PF2
       2 -> PF3
-      1 -> PF2
-    随后触发 KFS 模式下的 ch4:3->1 释放边沿。
+    释放完成后再将全局 suck_count 减 1。
+    随后触发 KFS 模式下的 ch4:3->1 释放边沿，并在关闭后等待 0.8s。
     """
     global suck_count
 
     suck_count_before = int(suck_count)
-    suck_count -= 1
-    release_count = int(suck_count)
-    if release_count not in (1, 2):
-        suck_count = suck_count_before
+    release_plan = {
+        3: (tools.CYLINDER_SELECT_PF2, "pf2"),
+        2: (tools.CYLINDER_SELECT_PF3, "pf3"),
+    }
+    release_cylinder_select, release_cylinder_name = release_plan.get(
+        suck_count_before,
+        (None, None),
+    )
+    if release_cylinder_select is None:
         print("未吸取足够kfs进行操作")
         sys.exit(1)
 
+    suck_count -= 1
     cylinder_selection_result = sucker_select_cylinder(
         sender,
-        cylinder_select=release_count,
+        cylinder_select=release_cylinder_select,
     )
     release_result = _release_kfs_suction_with_lock(
         sender=sender,
         keep_suction_on=False,
     )
+    post_release_wait_sec = 0.8
+    time.sleep(post_release_wait_sec)
     return {
         "completed": bool(release_result.get("completed", False)),
         "failed_step": (
@@ -552,9 +582,11 @@ def release_kfs(sender):
         ),
         "suck_count_before": suck_count_before,
         "suck_count_after": int(suck_count),
-        "released_cylinder": release_count,
+        "released_cylinder": int(release_cylinder_select),
+        "released_cylinder_name": release_cylinder_name,
         "cylinder_selection_result": cylinder_selection_result,
         "release_result": release_result,
+        "post_release_wait_sec": float(post_release_wait_sec),
     }
 
 
@@ -562,14 +594,14 @@ def sucker_release_pose(sender):
     """
     根据当前 suck_count 设置 KFS 释放前的吸盘角度。
 
-      suck_count=3 -> 180deg
-      suck_count=2 -> 0deg
+      suck_count=3 -> 0deg
+      suck_count=2 -> 180deg
     """
     current_suck_count = int(suck_count)
     if current_suck_count == 3:
-        rotation_result = sucker_180deg(sender)
-    elif current_suck_count == 2:
         rotation_result = sucker_0deg(sender)
+    elif current_suck_count == 2:
+        rotation_result = sucker_180deg(sender)
     else:
         print("未吸取足够kfs进行操作")
         sys.exit(1)

@@ -785,7 +785,7 @@ def run_meilin_test_prepare(context):
     global current_stair_id
 
     stair_id = -1
-    target_direction = 4 if position_backend.is_blue_field() else 1
+    target_direction = 1
     target_yaw_deg = tools.direction_int_to_yaw_deg(target_direction)
     target_x, target_y = module.get_stair_xy(stair_id)
     print(

@@ -4,6 +4,8 @@ import math
 import struct
 import threading
 import sys
+import re
+import select
 import rclpy
 from rclpy.executors import ExternalShutdownException, SingleThreadedExecutor
 from rclpy.node import Node
@@ -25,7 +27,10 @@ CYLINDER_SELECT_PF3 = 2
 MOTION_CHANNEL_SCALE_NUMERATOR = 3
 MOTION_CHANNEL_SCALE_DENOMINATOR = 4
 relocalization_flag = False
+odometry_mode_flag = False
+localization_mode_received = False
 AUTO_TRIGGER_LOCK = threading.Lock()
+PRESSURE_STATUS_PATTERN = re.compile(rb"pressure:(-?\d+),temp:(-?\d+)")
 
 
 def connect(tcp_ip=TCP_IP, tcp_port=TCP_PORT, retry_interval=CONNECT_RETRY_INTERVAL):
@@ -67,14 +72,19 @@ class _RelocalizationNode(Node):
 
     def _callback(self, msg: Bool):
         global relocalization_flag
+        global odometry_mode_flag
+        global localization_mode_received
 
         with self._lock:
-            prev = self._flag
             self._flag = bool(msg.data)
 
-        if (not prev) and self._flag:
+        localization_mode_received = True
+        if self._flag:
             relocalization_flag = True
-            self.get_logger().info('🎯 Relocalization confirmed (/odin1/flag1=True)')
+            odometry_mode_flag = False
+        else:
+            relocalization_flag = False
+            odometry_mode_flag = True
 
     def get_flag(self) -> bool:
         with self._lock:
@@ -97,9 +107,13 @@ def _spin_relocalization(node: _RelocalizationNode, stop_event: threading.Event)
 
 def relocalization_conformation(topic='/odin1/flag1'):
     """
-    启动重定位确认监听（非阻塞）
+    启动定位模式确认监听（非阻塞）。
+
+    /odin1/flag1=True 表示正常重定位模式，False 表示里程计模式；
+    收到任一值均表示定位模式已就绪。
+
     返回:
-      get_flag: 可调用函数，返回当前flag(bool)
+      get_flag: 可调用函数，返回当前重定位模式标志（True=正常重定位）
       node: ROS节点对象
       spin_thread: 后台spin线程
       stop_event: 停止事件（供销毁函数使用）
@@ -117,6 +131,11 @@ def relocalization_conformation(topic='/odin1/flag1'):
     spin_thread.start()
 
     return node.get_flag, node, spin_thread, stop_event
+
+
+def is_odometry_mode():
+    """返回当前 /odin1/flag1 选择的里程计模式状态（False 分支）。"""
+    return bool(odometry_mode_flag)
 
 
 def destroy_ros2_thread(node, spin_thread, stop_event, shutdown_rclpy=False):
@@ -637,9 +656,20 @@ class frame_thread:
         self._lock = threading.Lock()
         self._running = False
         self._thread = None
+        self._rx_thread = None
         self._first_send_event = threading.Event()
         self._last_send_ok = False
         self._last_send_time = None
+        self._rx_buffer = b""
+        self._pressure_lock = threading.Lock()
+        self._latest_pressure = None
+        self._latest_temperature = None
+        self._latest_pressure_time = None
+        self._last_rx_error = None
+        self._last_rx_time = None
+        self._last_rx_line = None
+        self._last_unmatched_rx_line = None
+        self._rx_byte_count = 0
 
     def _channels_snapshot(self):
         return [
@@ -784,6 +814,29 @@ class frame_thread:
                 "last_send_time": self._last_send_time,
             }
 
+    def get_pressure(self):
+        """
+        返回下位机最新回传的 pressure 值；尚未收到有效数据时返回 None。
+        """
+        with self._pressure_lock:
+            return self._latest_pressure
+
+    def get_pressure_status(self):
+        """
+        返回最新压力回传状态，包含 pressure/temp/update_time。
+        """
+        with self._pressure_lock:
+            return {
+                "pressure": self._latest_pressure,
+                "temperature": self._latest_temperature,
+                "update_time": self._latest_pressure_time,
+                "last_rx_error": self._last_rx_error,
+                "last_rx_time": self._last_rx_time,
+                "last_rx_line": self._last_rx_line,
+                "last_unmatched_rx_line": self._last_unmatched_rx_line,
+                "rx_byte_count": self._rx_byte_count,
+            }
+
     def start(self):
         with self._lock:
             if self._running:
@@ -799,6 +852,12 @@ class frame_thread:
             name="frame_thread",
         )
         self._thread.start()
+        self._rx_thread = threading.Thread(
+            target=self._recv_loop,
+            daemon=True,
+            name="pressure_recv_thread",
+        )
+        self._rx_thread.start()
         return self._thread
 
     def wait_until_first_send(self, timeout_sec=2.0):
@@ -816,6 +875,9 @@ class frame_thread:
         if self._thread is not None and self._thread.is_alive():
             self._thread.join(timeout=1.0)
 
+        if self._rx_thread is not None and self._rx_thread.is_alive():
+            self._rx_thread.join(timeout=1.0)
+
         if send_stop:
             try:
                 with self._lock:
@@ -832,6 +894,14 @@ class frame_thread:
                 )
             except Exception:
                 pass
+
+    def _running_snapshot(self):
+        with self._lock:
+            return bool(self._running)
+
+    def _sock_snapshot(self):
+        with self._lock:
+            return self.sock
 
     def _snapshot(self):
         with self._lock:
@@ -888,6 +958,58 @@ class frame_thread:
                 time.sleep(sleep_time)
             else:
                 next_send = time.time()
+
+    def _handle_rx_line(self, line):
+        with self._pressure_lock:
+            self._last_rx_line = bytes(line)
+
+        match = PRESSURE_STATUS_PATTERN.fullmatch(line)
+        if match is None:
+            with self._pressure_lock:
+                self._last_unmatched_rx_line = bytes(line)
+            return False
+
+        pressure = int(match.group(1))
+        temperature = int(match.group(2))
+        with self._pressure_lock:
+            self._latest_pressure = pressure
+            self._latest_temperature = temperature
+            self._latest_pressure_time = time.time()
+            self._last_rx_error = None
+        return True
+
+    def _recv_loop(self):
+        while self._running_snapshot():
+            sock = self._sock_snapshot()
+            if sock is None:
+                time.sleep(0.05)
+                continue
+
+            try:
+                readable, _, _ = select.select([sock], [], [], 0.1)
+                if not readable:
+                    continue
+
+                data = sock.recv(1024)
+                if not data:
+                    time.sleep(0.05)
+                    continue
+
+                with self._pressure_lock:
+                    self._last_rx_time = time.time()
+                    self._rx_byte_count += len(data)
+
+                self._rx_buffer += data
+                if len(self._rx_buffer) > 4096:
+                    self._rx_buffer = self._rx_buffer[-4096:]
+
+                while b"\n" in self._rx_buffer:
+                    line, self._rx_buffer = self._rx_buffer.split(b"\n", 1)
+                    self._handle_rx_line(line.strip())
+            except Exception as exc:
+                with self._pressure_lock:
+                    self._last_rx_error = repr(exc)
+                time.sleep(0.05)
 
 
 def handle_ctrl_c(

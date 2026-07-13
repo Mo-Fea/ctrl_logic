@@ -43,11 +43,6 @@ DEFAULT_COLOR_FPS = 30
 DEFAULT_WARMUP_FRAMES = 15
 DEFAULT_WARMUP_TIMEOUT_MS = 5000
 DEFAULT_WARMUP_RETRY_COUNT = 3
-DEFAULT_REALSENSE_STREAM_CANDIDATES = (
-    (1280, 720, 30),
-    (848, 480, 30),
-    (640, 480, 30),
-)
 DEFAULT_REALSENSE_COLOR_AUTO_EXPOSURE = False
 DEFAULT_REALSENSE_COLOR_EXPOSURE = 120.0
 DEFAULT_REALSENSE_COLOR_GAIN = 32.0
@@ -112,15 +107,6 @@ def _format_realsense_devices(devices):
             f"USB={device.get('usb', 'unknown')}"
         )
     return "\n".join(lines)
-
-
-def _make_realsense_stream_candidates(width, height, fps, enable_fallback=True):
-    candidates = [(int(width), int(height), int(fps))]
-    if enable_fallback:
-        for candidate in DEFAULT_REALSENSE_STREAM_CANDIDATES:
-            if candidate not in candidates:
-                candidates.append(candidate)
-    return candidates
 
 
 def _warmup_realsense_pipeline(
@@ -228,7 +214,6 @@ def open_d435i(
     warmup_frames=DEFAULT_WARMUP_FRAMES,
     warmup_timeout_ms=DEFAULT_WARMUP_TIMEOUT_MS,
     warmup_retry_count=DEFAULT_WARMUP_RETRY_COUNT,
-    enable_fallback=True,
     color_auto_exposure=DEFAULT_REALSENSE_COLOR_AUTO_EXPOSURE,
     color_exposure=DEFAULT_REALSENSE_COLOR_EXPOSURE,
     color_gain=DEFAULT_REALSENSE_COLOR_GAIN,
@@ -249,12 +234,7 @@ def open_d435i(
             "未发现 RealSense 设备。请检查 USB 连接、供电、权限和设备占用。"
         )
 
-    candidates = _make_realsense_stream_candidates(
-        width=width,
-        height=height,
-        fps=fps,
-        enable_fallback=enable_fallback,
-    )
+    candidates = [(int(width), int(height), int(fps))]
     errors = []
 
     for candidate_width, candidate_height, candidate_fps in candidates:

@@ -1,4 +1,5 @@
 import time
+import math
 
 from lib2 import compete_logic
 from lib2 import kfs
@@ -12,6 +13,7 @@ R1 = 2
 R2 = 2
 kfs_suck = 2
 weapon_id = 4
+WEAPON_Y_CORRECTION = 0.0
 current_rule = 1
 meilin_situration = "000000000000"
 sender = None
@@ -52,6 +54,20 @@ def read_int(prompt, valid_values=None, min_value=None, max_value=None):
             print(ERROR_INPUT_TEXT)
             continue
         if max_value is not None and value > max_value:
+            print(ERROR_INPUT_TEXT)
+            continue
+        return value
+
+
+def read_float(prompt):
+    while True:
+        raw = input(prompt).strip()
+        try:
+            value = float(raw)
+        except ValueError:
+            print(ERROR_INPUT_TEXT)
+            continue
+        if not math.isfinite(value):
             print(ERROR_INPUT_TEXT)
             continue
         return value
@@ -121,6 +137,7 @@ def print_current_config(action_name):
         f"R2={R2}, "
         f"kfs_suck={kfs_suck}, "
         f"weapon_id={weapon_id}, "
+        f"weapon_y_correction={WEAPON_Y_CORRECTION}, "
         f"current_rule={current_rule}, "
         f"meilin_situration={meilin_situration}"
     )
@@ -176,6 +193,7 @@ def run_full_confrontation_match():
         position_runtime=position_runtime,
         odom_runtime=odom_runtime,
         weapon_id=weapon_id,
+        fetch_weapon_y_correction=WEAPON_Y_CORRECTION,
     )
     if not region_1_result.get("completed", False):
         print_flow_failure("区域1", region_1_result)
@@ -264,6 +282,7 @@ def run_full_challenge_wulin_match():
         position_runtime=position_runtime,
         odom_runtime=odom_runtime,
         weapon_id=weapon_id,
+        fetch_weapon_y_correction=WEAPON_Y_CORRECTION,
     )
     if not region_1_result.get("completed", False):
         print_flow_failure("区域1", region_1_result)
@@ -297,7 +316,12 @@ def run_full_challenge_wulin_match():
     }
 
 
-def run_full_challenge_jiugong_match(wait_before_region_3=False, kfs_preparation_result=None):
+def run_full_challenge_jiugong_match(
+    wait_before_region_3=False,
+    kfs_preparation_result=None,
+    column=None,
+    extra_needed=None,
+):
     print_current_config("完整比赛/挑战赛/九宫区域")
 
     prepared_here = kfs_preparation_result is None
@@ -318,11 +342,13 @@ def run_full_challenge_jiugong_match(wait_before_region_3=False, kfs_preparation
         print("等待10秒")
         time.sleep(10.0)
 
-    region_3_result = compete_logic.rigion_3(
+    region_3_result = compete_logic.rigion3_challenge(
         sender=sender,
         position_runtime=position_runtime,
         odom_runtime=odom_runtime,
         final_strategy=get_rigion_3_final_strategy(),
+        column=column,
+        extra_needed=extra_needed,
     )
     if not region_3_result.get("completed", False):
         print_flow_failure("区域3", region_3_result)
@@ -567,9 +593,16 @@ def challenge_jiugong_flow():
     if not wait_start():
         return
     wait_choice = read_int("是否需要等待(0.否 1.是)：", valid_values=(0, 1))
+    column = None
+    extra_needed = None
+    if get_rigion_3_final_strategy() == 2:
+        column = read_int("请输入需要放置的列号（1-3）：", valid_values=(1, 2, 3))
+        extra_needed = read_int("是否需要额外吸取（0.否 1.是）：", valid_values=(0, 1))
     run_full_challenge_jiugong_match(
         wait_before_region_3=(wait_choice == 1),
         kfs_preparation_result=kfs_preparation_result,
+        column=column,
+        extra_needed=extra_needed,
     )
 
 
@@ -658,6 +691,9 @@ def jiugong_retry_flow():
 
 
 def area_retry_flow():
+    global WEAPON_Y_CORRECTION
+
+    WEAPON_Y_CORRECTION = read_float("weapon点y向偏差（单位m）：")
     while True:
         print_separator()
         print("区域重试")

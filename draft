@@ -463,3 +463,6 @@ fetch_weapon
 2.2 梅林区域重试
 2.3 九宫格区域重试
 3.恢复至完全初始态
+
+
+现在加一个totally_win_challenge,输入中需要有一个数column（取值为1,2,3），一个数extra_needed(取0或者1)。逻辑上进入后，判断column值，然后先移动到对应的pre_column点，然后执行block_till_pressure.待退出block_till_pressure的阻塞之后，先延时2s，然后执行机械臂姿态方法place_kfs_pose，然后延时2s。之后移动到对应的column点，执行release_kfs。然后移动到pre_column2,接着对extra_needed做判断，如果为1,则置suck_count为3,并且气缸选择1（pf2），之后打开对应气缸，然后直接调用190_highscore_challenge.完成后返回。如果extra_needed为0,则移动到R1climb点，先后调用sucker_release_pose,与机械臂姿态place_3rd_kfs_pose，然后移动到R1climb点，后续逻辑与原来totally_win逻辑一样

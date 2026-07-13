@@ -301,6 +301,7 @@ def rigion_1(
     scanner_start_timeout_sec=1.0,
     scanner_release_timeout_sec=None,
     fetch_weapon_kwargs=None,
+    fetch_weapon_y_correction=0.0,
     lock_wheel_kwargs=None,
     unlock_wheel_kwargs=None,
     weapon_down_kwargs=None,
@@ -311,7 +312,8 @@ def rigion_1(
     """
     区域 1 流程：后台识别 QR，同时抓取 weapon，等待 QR 线程释放锁后进入后续动作。
 
-    weapon_id 取 1~6，默认 4。
+    weapon_id 取 1~6，默认 4。fetch_weapon_y_correction 用于修正
+    抓取 weapon 时接近点和返回点的 y 坐标，默认 0。
     """
     weapon_id = int(weapon_id)
     if weapon_id < 1 or weapon_id > 6:
@@ -320,6 +322,7 @@ def rigion_1(
     fetch_weapon_kwargs = (
         {} if fetch_weapon_kwargs is None else dict(fetch_weapon_kwargs)
     )
+    fetch_weapon_kwargs["y_correction"] = float(fetch_weapon_y_correction)
     lock_wheel_kwargs = (
         {} if lock_wheel_kwargs is None else dict(lock_wheel_kwargs)
     )
@@ -611,4 +614,86 @@ def rigion_3(
         "preparation_pose_name": strategy_flow_result.get("preparation_pose_name"),
         "preparation_pose_result": strategy_flow_result.get("preparation_pose_result"),
         "strategy_result": strategy_flow_result.get("strategy_result"),
+    }
+
+
+def rigion3_challenge(
+    sender,
+    position_runtime,
+    odom_runtime,
+    final_strategy=1,
+    column=None,
+    extra_needed=None,
+    enter_battlefield_kwargs=None,
+):
+    """
+    挑战赛区域 3 流程。
+
+    保留 rigion_3() 的入场逻辑，但最终策略改为挑战赛版本：
+      final_strategy=1: high_score190_challenge
+      final_strategy=2: totally_win_challenge(column, extra_needed)
+    """
+    final_strategy = int(final_strategy)
+    if final_strategy not in (1, 2):
+        raise ValueError(f"final_strategy must be 1 or 2, got {final_strategy}")
+    if final_strategy == 2 and (column is None or extra_needed is None):
+        raise ValueError(
+            "column and extra_needed are required when final_strategy is 2"
+        )
+
+    enter_battlefield_kwargs = (
+        {}
+        if enter_battlefield_kwargs is None
+        else dict(enter_battlefield_kwargs)
+    )
+
+    enter_battlefield_result = move.enter_battlefield(
+        sender=sender,
+        position_runtime=position_runtime,
+        odom_runtime=odom_runtime,
+        **enter_battlefield_kwargs,
+    )
+    if not enter_battlefield_result.get("completed", False):
+        return {
+            "completed": False,
+            "failed_step": "enter_battlefield",
+            "final_strategy": int(final_strategy),
+            "column": column,
+            "extra_needed": extra_needed,
+            "enter_battlefield_result": enter_battlefield_result,
+            "strategy_name": None,
+            "strategy_result": None,
+        }
+
+    if final_strategy == 1:
+        strategy_name = "high_score190_challenge"
+        strategy_result = module.high_score190_challenge(
+            sender=sender,
+            position_runtime=position_runtime,
+            odom_runtime=odom_runtime,
+        )
+    else:
+        strategy_name = "totally_win_challenge"
+        strategy_result = module.totally_win_challenge(
+            sender=sender,
+            position_runtime=position_runtime,
+            odom_runtime=odom_runtime,
+            column=column,
+            extra_needed=extra_needed,
+        )
+
+    completed = bool(strategy_result.get("completed", False))
+    return {
+        "completed": completed,
+        "failed_step": (
+            None
+            if completed
+            else strategy_result.get("failed_step", strategy_name)
+        ),
+        "final_strategy": int(final_strategy),
+        "column": column,
+        "extra_needed": extra_needed,
+        "enter_battlefield_result": enter_battlefield_result,
+        "strategy_name": strategy_name,
+        "strategy_result": strategy_result,
     }

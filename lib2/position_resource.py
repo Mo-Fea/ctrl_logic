@@ -908,7 +908,13 @@ def _position_loop(
         if robot_pose is not None:
             yaw_deg = position_lib.radians_to_degrees(robot_pose["yaw"])
             yaw_i16 = tools.yaw_deg_to_i16(yaw_deg)
-            runtime.sender.set_current_yaw_i16(yaw_i16)
+            control_yaw_converter = getattr(position_lib, "radians_to_control_degrees", None)
+            if control_yaw_converter is None:
+                control_yaw_deg = yaw_deg
+            else:
+                control_yaw_deg = control_yaw_converter(robot_pose["yaw"])
+            control_yaw_i16 = tools.yaw_deg_to_i16(control_yaw_deg)
+            runtime.sender.set_current_yaw_i16(control_yaw_i16)
             runtime.update(
                 lidar_pose=lidar_pose,
                 robot_pose=robot_pose,

@@ -32,6 +32,7 @@ ACTION_MATRIX_COLUMNS = [
     "grab_action",
 ]
 ACTION_MATRIX_ROW_SIZE = 5
+CHALLENGE_HIGH_SCORE190_PRESSURE_BOUNDARY = -20000.0
 
 CHALLENGE_ACTION_MATRIX = [
     [-1,2,1,1,0],
@@ -121,9 +122,9 @@ def init(
     - 连接下位机
     - 关闭航向 PID，执行 weapon_up、weapon_loose、weapon_down，并将 ch9 初始化为 800
     - 完成后将 ch1 归零并退出 weapon 模式，保持夹爪打开 ch4=3 和 ch9=800
-    - 启动重定位监听
-    - 可选等待重定位成功后再返回
-    - 可选在重定位成功后自动销毁重定位监听
+    - 启动定位模式监听
+    - 可选等待定位模式消息到达后再返回
+    - 可选在定位模式确认后自动销毁监听
     - 创建并启动 frame_thread
     - 可选等待 frame_thread 首帧发送成功后再返回
 
@@ -137,13 +138,15 @@ def init(
 
     返回:
       sender: 已启动的 frame_thread
-      get_flag: 可调用函数，返回当前重定位flag(bool)
+      get_flag: 可调用函数，返回当前重定位模式标志（True=正常重定位，False=里程计）
       flag_node: ROS节点对象
       flag_thread: 后台spin线程
       flag_stop_event: 停止事件
     """
     configure_position_backend(lidar_type)
     tools.relocalization_flag = False
+    tools.odometry_mode_flag = False
+    tools.localization_mode_received = False
     sock = tools.connect(
         tcp_ip=tcp_ip,
         tcp_port=tcp_port,
@@ -221,8 +224,8 @@ def init(
     )
 
     if wait_relocalization:
-        print(f"Waiting for relocalization flag on {topic}...")
-        while not tools.relocalization_flag:
+        print(f"Waiting for localization mode flag on {topic}...")
+        while not tools.localization_mode_received:
             time.sleep(wait_poll_interval)
         if auto_destroy_relocalization_listener:
             tools.destroy_ros2_thread(
@@ -882,17 +885,27 @@ def side_suck(
             f"target_stair_id must be 1 or 3, got {target_stair_id}"
         )
 
+    requested_target_stair_id = target_stair_id
+    if position_backend.is_blue_field():
+        effective_target_stair_id = 3 if target_stair_id == 1 else 1
+    else:
+        effective_target_stair_id = target_stair_id
+
     suck_count = int(kfs.suck_count)
-    if (target_stair_id, suck_count) in ((1, 1), (3, 2)):
+    rotation_target_stair_id = requested_target_stair_id
+    if (rotation_target_stair_id, suck_count) in ((1, 1), (3, 2)):
         sucker_rotation_result = kfs.sucker_90deg(sender)
-    elif (target_stair_id, suck_count) in ((1, 2), (3, 1)):
+    elif (rotation_target_stair_id, suck_count) in ((1, 2), (3, 1)):
         sucker_rotation_result = kfs.sucker_neg90deg(sender)
     else:
         return {
             "completed": False,
             "implemented": False,
             "failed_step": "side_suck_branch_not_implemented",
-            "target_stair_id": int(target_stair_id),
+            "target_stair_id": int(requested_target_stair_id),
+            "effective_target_stair_id": int(effective_target_stair_id),
+            "rotation_target_stair_id": int(rotation_target_stair_id),
+            "is_blue_field": bool(position_backend.is_blue_field()),
             "suck_count": int(suck_count),
             "sucker_rotation_result": None,
             "side_pose_result": None,
@@ -911,7 +924,7 @@ def side_suck(
         sender=sender,
         position_runtime=position_runtime,
         odom_runtime=odom_runtime,
-        target_stair_id=target_stair_id,
+        target_stair_id=effective_target_stair_id,
         lateral_distance=0.6,
         cruise_forward_cmd=move_speed,
         adjust_forward_cmd=300,
@@ -923,7 +936,10 @@ def side_suck(
             "completed": False,
             "implemented": True,
             "failed_step": "side_suck_movement",
-            "target_stair_id": int(target_stair_id),
+            "target_stair_id": int(requested_target_stair_id),
+            "effective_target_stair_id": int(effective_target_stair_id),
+            "rotation_target_stair_id": int(rotation_target_stair_id),
+            "is_blue_field": bool(position_backend.is_blue_field()),
             "suck_count": int(suck_count),
             "sucker_rotation_result": sucker_rotation_result,
             "side_pose_result": side_pose_result,
@@ -944,7 +960,7 @@ def side_suck(
     target_yaw_deg = side_suck_movement_result.get("target_yaw_deg")
     lateral_move_result = move_lib.side_suck_lateral_movement(
         sender=sender,
-        target_stair_id=target_stair_id,
+        target_stair_id=requested_target_stair_id,
         target_yaw_deg=target_yaw_deg,
     )
     if not lateral_move_result.get("completed", False):
@@ -952,7 +968,10 @@ def side_suck(
             "completed": False,
             "implemented": True,
             "failed_step": "side_suck_lateral_movement",
-            "target_stair_id": int(target_stair_id),
+            "target_stair_id": int(requested_target_stair_id),
+            "effective_target_stair_id": int(effective_target_stair_id),
+            "rotation_target_stair_id": int(rotation_target_stair_id),
+            "is_blue_field": bool(position_backend.is_blue_field()),
             "suck_count": int(suck_count),
             "sucker_rotation_result": sucker_rotation_result,
             "cylinder_selection_result": cylinder_selection_result,
@@ -980,7 +999,10 @@ def side_suck(
             "completed": False,
             "implemented": True,
             "failed_step": "return_to_stair_minus_one",
-            "target_stair_id": int(target_stair_id),
+            "target_stair_id": int(requested_target_stair_id),
+            "effective_target_stair_id": int(effective_target_stair_id),
+            "rotation_target_stair_id": int(rotation_target_stair_id),
+            "is_blue_field": bool(position_backend.is_blue_field()),
             "suck_count": int(suck_count),
             "sucker_rotation_result": sucker_rotation_result,
             "cylinder_selection_result": cylinder_selection_result,
@@ -998,7 +1020,10 @@ def side_suck(
         "completed": True,
         "implemented": True,
         "failed_step": None,
-        "target_stair_id": int(target_stair_id),
+        "target_stair_id": int(requested_target_stair_id),
+        "effective_target_stair_id": int(effective_target_stair_id),
+        "rotation_target_stair_id": int(rotation_target_stair_id),
+        "is_blue_field": bool(position_backend.is_blue_field()),
         "suck_count": int(suck_count),
         "sucker_rotation_result": sucker_rotation_result,
         "cylinder_selection_result": cylinder_selection_result,
@@ -1151,10 +1176,12 @@ def fetch_weapon(
     release_edge_hold_sec=0.3,
     move_to_approach_point=1,
     drop_before_grab_wait_sec=0.8,
+    y_correction=0.0,
 ):
     """
-    根据 weapon_id 选择目标点，移动到目标点前方，再到目标点执行夹取、抬起、
-    返回前方点并旋转到释放方向。函数返回时保持夹取状态，不自动放下或松开。
+    根据 weapon_id 选择目标点，移动到目标点前方，再后退碰撞 weapon 台执行
+    夹取、抬起、返回前方点并旋转到释放方向。函数返回时保持夹取状态，
+    不自动放下或松开。
 
     weapon_id 对应目标点从当前 position 后端读取。
     """
@@ -1188,8 +1215,9 @@ def fetch_weapon(
         release_rotate_yaw_deg = 180.0
 
     approach_offset = abs(float(weapon_approach_offset_y))
+    y_correction = float(y_correction)
     approach_x = float(des_x) + approach_offset
-    approach_y = float(des_y)
+    approach_y = float(des_y) + y_correction
     approach_offset_direction = 1
 
     return_move_x = float(approach_x)
@@ -1226,27 +1254,24 @@ def fetch_weapon(
                     "offset_distance": float(approach_offset),
                     "offset_axis": "x",
                     "offset_direction": int(approach_offset_direction),
+                    "y_correction": float(y_correction),
                 },
                 "approach_move_skipped": False,
                 "approach_move_result": approach_move_result,
             }
 
-    # 第二段：用 weapon/夹爪参考点，按当前半场目标航向移动到对应 weapon 目标点。
-    move_result = move_lib.move_to_target(
+    # 第二段：保持目标航向，以 ch2=300 后退直到碰撞 weapon 台。
+    weapon_collision_result = move_lib.fb_till_collision(
         sender=sender,
-        position_runtime=position_runtime,
         odom_runtime=odom_runtime,
-        target_x=des_x,
-        target_y=des_y,
-        final_target_yaw_deg=final_target_yaw_deg,
-        cruise_forward_cmd=v,
-        stop_distance=0.01,
-        reference="weapon",
+        direction=-1,
+        value=300,
+        target_yaw_deg=final_target_yaw_deg,
     )
-    if move_result is None or move_result.get("timed_out"):
+    if not weapon_collision_result.get("completed", False):
         return {
             "completed": False,
-            "failed_step": "weapon_target_move",
+            "failed_step": "weapon_collision",
             "weapon_id": int(weapon_id),
             "des_weapon": {
                 "x": float(des_x),
@@ -1259,10 +1284,11 @@ def fetch_weapon(
                 "offset_distance": float(approach_offset),
                 "offset_axis": "x",
                 "offset_direction": int(approach_offset_direction),
+                "y_correction": float(y_correction),
             },
             "approach_move_skipped": not move_to_approach_point,
             "approach_move_result": approach_move_result,
-            "move_result": move_result,
+            "weapon_collision_result": weapon_collision_result,
         }
 
     drop_before_grab_result = weapon_lib.weapon_down(
@@ -1353,10 +1379,12 @@ def fetch_weapon(
             "offset_distance": float(approach_offset),
             "offset_axis": "x",
             "offset_direction": int(approach_offset_direction),
+            "y_correction": float(y_correction),
         },
         "approach_move_skipped": not move_to_approach_point,
         "approach_move_result": approach_move_result,
-        "move_result": move_result,
+        "move_result": weapon_collision_result,
+        "weapon_collision_result": weapon_collision_result,
         "grab_result": {
             "mode_channels": lift_result["arm_channels"],
             "drop_before_grab_channels": drop_before_grab_result["fire_channels"],
@@ -1602,9 +1630,10 @@ def climb_R1(
             "climb_result": climb_result,
         }
 
+    post_climb_wait_sec = 1.0
     post_climb_wait_result = move_lib.wait_with_target_yaw(
         sender=sender,
-        duration_sec=4.0,
+        duration_sec=post_climb_wait_sec,
         target_yaw_deg=target_yaw_deg,
     )
     post_climb_drive_result = move_lib.drive_with_channels_for_duration(
@@ -1643,7 +1672,7 @@ def climb_R1(
         "stop_yaw_pid_after": bool(stop_yaw_pid_after),
         "pre_climb_duration_sec": float(pre_climb_duration_sec),
         "pre_climb_forward_cmd": 100,
-        "post_climb_wait_sec": 4.0,
+        "post_climb_wait_sec": float(post_climb_wait_sec),
         "post_climb_duration_sec": 3.0,
         "post_climb_forward_cmd": 50,
         "rotate_result": rotate_result,
@@ -1795,6 +1824,13 @@ def high_score190(
             **results,
         }
 
+    up_detection_result = move_lib.uodown_detection(
+        position_runtime=position_runtime,
+        mode=0,
+        height_delta=0.02,
+    )
+    results["up_detection_result"] = up_detection_result
+
     sucker_release_pose_result = kfs.sucker_release_pose(sender)
     results["sucker_release_pose_result"] = sucker_release_pose_result
     if not sucker_release_pose_result.get("completed", False):
@@ -1819,6 +1855,562 @@ def high_score190(
     }
 
 
+def high_score190_challenge(
+    sender,
+    position_runtime,
+    odom_runtime,
+):
+    """
+    挑战赛 190 分组合流程。
+
+    固定执行顺序：
+      1. 以 180deg 移动到 pre_column2_<red/blue>
+      2. 阻塞等待 pressure < CHALLENGE_HIGH_SCORE190_PRESSURE_BOUNDARY
+      3. 等待 2s
+      4. 执行 place_3rd_kfs_pose()
+      5. 等待 3s
+      6. 以 180deg 移动到 R1climb_<red/blue>
+      7. 执行与 high_score190() 到达 R1climb 后相同的碰撞、上楼和放置流程
+    """
+    is_blue_field = position_backend.is_blue_field()
+    field_name = "blue" if is_blue_field else "red"
+    target_yaw_deg = 180.0
+    pre_column2_coordinate_name = (
+        "pre_column2_blue" if is_blue_field else "pre_column2_red"
+    )
+    r1climb_coordinate_name = (
+        "R1climb_blue" if is_blue_field else "R1climb_red"
+    )
+    current_position_lib = position_resource.get_position_lib()
+    pre_column2_target = move_lib._get_corrected_battlefield_coordinate(
+        current_position_lib,
+        pre_column2_coordinate_name,
+    )
+    r1climb_target = move_lib._get_corrected_battlefield_coordinate(
+        current_position_lib,
+        r1climb_coordinate_name,
+    )
+    pressure_boundary = float(CHALLENGE_HIGH_SCORE190_PRESSURE_BOUNDARY)
+    pre_pose_wait_sec = 2.0
+    post_pose_wait_sec = 3.0
+    results = {
+        "field_name": field_name,
+        "suck_count_before": int(kfs.suck_count),
+        "target_yaw_deg": float(target_yaw_deg),
+        "pre_column2_coordinate_name": pre_column2_coordinate_name,
+        "r1climb_coordinate_name": r1climb_coordinate_name,
+        "pressure_boundary": pressure_boundary,
+        "pressure_mode": 0,
+        "pre_pose_wait_sec": pre_pose_wait_sec,
+        "post_pose_wait_sec": post_pose_wait_sec,
+        "pre_column2_target": {
+            "raw_x": float(pre_column2_target["raw_x"]),
+            "raw_y": float(pre_column2_target["raw_y"]),
+            "x": float(pre_column2_target["x"]),
+            "y": float(pre_column2_target["y"]),
+        },
+        "r1climb_target": {
+            "raw_x": float(r1climb_target["raw_x"]),
+            "raw_y": float(r1climb_target["raw_y"]),
+            "x": float(r1climb_target["x"]),
+            "y": float(r1climb_target["y"]),
+        },
+    }
+
+    if int(kfs.suck_count) != 3:
+        return {
+            "completed": False,
+            "failed_step": "invalid_suck_count_before_high_score190_challenge",
+            "required_suck_count": 3,
+            **results,
+        }
+
+    move_to_pre_column2_result = move_to_des(
+        sender=sender,
+        position_runtime=position_runtime,
+        odom_runtime=odom_runtime,
+        x=pre_column2_target["x"],
+        y=pre_column2_target["y"],
+        target_deg=target_yaw_deg,
+    )
+    results["move_to_pre_column2_result"] = move_to_pre_column2_result
+    if move_to_pre_column2_result is None:
+        return {
+            "completed": False,
+            "failed_step": "move_to_pre_column2",
+            **results,
+        }
+
+    pressure_wait_result = move_lib.block_till_pressure(
+        sender=sender,
+        boundary=pressure_boundary,
+        mode=0,
+    )
+    results["pressure_wait_result"] = pressure_wait_result
+
+    time.sleep(pre_pose_wait_sec)
+
+    place_3rd_kfs_pose_result = kfs.place_3rd_kfs_pose(sender)
+    results["place_3rd_kfs_pose_result"] = place_3rd_kfs_pose_result
+    if not place_3rd_kfs_pose_result.get("completed", False):
+        return {
+            "completed": False,
+            "failed_step": "place_3rd_kfs_pose",
+            **results,
+        }
+
+    time.sleep(post_pose_wait_sec)
+
+    move_to_r1climb_result = move_to_des(
+        sender=sender,
+        position_runtime=position_runtime,
+        odom_runtime=odom_runtime,
+        x=r1climb_target["x"],
+        y=r1climb_target["y"],
+        target_deg=target_yaw_deg,
+    )
+    results["move_to_r1climb_result"] = move_to_r1climb_result
+    if move_to_r1climb_result is None:
+        return {
+            "completed": False,
+            "failed_step": "move_to_R1climb",
+            **results,
+        }
+
+    r1climb_collision_result = move_lib.fb_till_collision(
+        sender=sender,
+        odom_runtime=odom_runtime,
+        direction=1,
+        value=150,
+        target_yaw_deg=target_yaw_deg,
+    )
+    results["r1climb_collision_result"] = r1climb_collision_result
+    if not r1climb_collision_result.get("completed", False):
+        return {
+            "completed": False,
+            "failed_step": "R1climb_collision",
+            **results,
+        }
+
+    climb_r1_result = climb_R1(
+        sender=sender,
+        position_runtime=position_runtime,
+        odom_runtime=odom_runtime,
+        target_yaw_deg=target_yaw_deg,
+    )
+    results["climb_r1_result"] = climb_r1_result
+    if not climb_r1_result.get("completed", False):
+        return {
+            "completed": False,
+            "failed_step": "climb_R1",
+            **results,
+        }
+
+    first_place_3rd_kfs_result = kfs.place_3rd_kfs(
+        sender=sender,
+        position_runtime=position_runtime,
+    )
+    results["first_place_3rd_kfs_result"] = first_place_3rd_kfs_result
+    if not first_place_3rd_kfs_result.get("completed", False):
+        return {
+            "completed": False,
+            "failed_step": "first_place_3rd_kfs",
+            "suck_count_after": int(kfs.suck_count),
+            **results,
+        }
+
+    up_detection_result = move_lib.uodown_detection(
+        position_runtime=position_runtime,
+        mode=0,
+        height_delta=0.02,
+    )
+    results["up_detection_result"] = up_detection_result
+
+    sucker_release_pose_result = kfs.sucker_release_pose(sender)
+    results["sucker_release_pose_result"] = sucker_release_pose_result
+    if not sucker_release_pose_result.get("completed", False):
+        return {
+            "completed": False,
+            "failed_step": "sucker_release_pose",
+            "suck_count_after": int(kfs.suck_count),
+            **results,
+        }
+
+    second_place_3rd_kfs_result = kfs.place_3rd_kfs(
+        sender=sender,
+        position_runtime=position_runtime,
+    )
+    results["second_place_3rd_kfs_result"] = second_place_3rd_kfs_result
+    completed = bool(second_place_3rd_kfs_result.get("completed", False))
+    return {
+        "completed": completed,
+        "failed_step": None if completed else "second_place_3rd_kfs",
+        "suck_count_after": int(kfs.suck_count),
+        **results,
+    }
+
+
+def totally_win_challenge(
+    sender,
+    position_runtime,
+    odom_runtime,
+    column,
+    extra_needed,
+):
+    """
+    挑战赛全胜组合流程。
+
+    固定先到 pre_column2 等待压力达标，再按 column 移动到目标预置点。
+    extra_needed=1 时吸取额外 KFS 后改走
+    high_score190_challenge()，extra_needed=0 时继续执行全胜的上 R1 收尾。
+    """
+    try:
+        column = int(column)
+        extra_needed = int(extra_needed)
+    except (TypeError, ValueError):
+        raise ValueError(
+            f"column and extra_needed must be int, got {column!r}, {extra_needed!r}"
+        )
+    if column not in (1, 2, 3):
+        raise ValueError(f"column must be 1, 2, or 3, got {column}")
+    if extra_needed not in (0, 1):
+        raise ValueError(f"extra_needed must be 0 or 1, got {extra_needed}")
+
+    is_blue_field = position_backend.is_blue_field()
+    field_name = "blue" if is_blue_field else "red"
+    field_suffix = "blue" if is_blue_field else "red"
+    target_yaw_deg = 180.0
+    selected_pre_column_coordinate_name = f"pre_column{column}_{field_suffix}"
+    selected_column_coordinate_name = f"column{column}_{field_suffix}"
+    pre_column2_coordinate_name = f"pre_column2_{field_suffix}"
+    r1climb_coordinate_name = f"R1climb_{field_suffix}"
+    current_position_lib = position_resource.get_position_lib()
+    selected_pre_column_target = move_lib._get_corrected_battlefield_coordinate(
+        current_position_lib,
+        selected_pre_column_coordinate_name,
+    )
+    selected_column_target = move_lib._get_corrected_battlefield_coordinate(
+        current_position_lib,
+        selected_column_coordinate_name,
+    )
+    pre_column2_target = move_lib._get_corrected_battlefield_coordinate(
+        current_position_lib,
+        pre_column2_coordinate_name,
+    )
+    r1climb_target = move_lib._get_corrected_battlefield_coordinate(
+        current_position_lib,
+        r1climb_coordinate_name,
+    )
+    pressure_boundary = float(CHALLENGE_HIGH_SCORE190_PRESSURE_BOUNDARY)
+    pre_pose_wait_sec = 2.0
+    post_pose_wait_sec = 3.0
+    results = {
+        "field_name": field_name,
+        "column": int(column),
+        "extra_needed": int(extra_needed),
+        "suck_count_before": int(kfs.suck_count),
+        "target_yaw_deg": float(target_yaw_deg),
+        "pressure_boundary": pressure_boundary,
+        "pressure_mode": 0,
+        "pre_pose_wait_sec": pre_pose_wait_sec,
+        "post_pose_wait_sec": post_pose_wait_sec,
+        "selected_pre_column_coordinate_name": selected_pre_column_coordinate_name,
+        "selected_column_coordinate_name": selected_column_coordinate_name,
+        "pre_column2_coordinate_name": pre_column2_coordinate_name,
+        "r1climb_coordinate_name": r1climb_coordinate_name,
+        "selected_pre_column_target": {
+            "x": float(selected_pre_column_target["x"]),
+            "y": float(selected_pre_column_target["y"]),
+        },
+        "selected_column_target": {
+            "x": float(selected_column_target["x"]),
+            "y": float(selected_column_target["y"]),
+        },
+        "pre_column2_target": {
+            "x": float(pre_column2_target["x"]),
+            "y": float(pre_column2_target["y"]),
+        },
+        "r1climb_target": {
+            "x": float(r1climb_target["x"]),
+            "y": float(r1climb_target["y"]),
+        },
+    }
+
+    if int(kfs.suck_count) != 3:
+        return {
+            "completed": False,
+            "failed_step": "invalid_suck_count_before_totally_win_challenge",
+            "required_suck_count": 3,
+            **results,
+        }
+
+    move_to_pre_column2_before_pressure_result = move_to_des(
+        sender=sender,
+        position_runtime=position_runtime,
+        odom_runtime=odom_runtime,
+        x=pre_column2_target["x"],
+        y=pre_column2_target["y"],
+        target_deg=target_yaw_deg,
+    )
+    results["move_to_pre_column2_before_pressure_result"] = (
+        move_to_pre_column2_before_pressure_result
+    )
+    if move_to_pre_column2_before_pressure_result is None:
+        return {
+            "completed": False,
+            "failed_step": "move_to_pre_column2_before_pressure",
+            **results,
+        }
+
+    pressure_wait_result = move_lib.block_till_pressure(
+        sender=sender,
+        boundary=pressure_boundary,
+        mode=0,
+    )
+    results["pressure_wait_result"] = pressure_wait_result
+
+    time.sleep(pre_pose_wait_sec)
+
+    place_kfs_pose_result = kfs.place_kfs_pose(sender)
+    results["place_kfs_pose_result"] = place_kfs_pose_result
+    if not place_kfs_pose_result.get("completed", False):
+        return {
+            "completed": False,
+            "failed_step": "place_kfs_pose",
+            **results,
+        }
+
+    time.sleep(post_pose_wait_sec)
+
+    if column == 2:
+        move_to_selected_pre_column_result = {
+            "completed": True,
+            "skipped": True,
+            "reason": "already_at_pre_column2",
+        }
+    else:
+        move_to_selected_pre_column_result = move_to_des(
+            sender=sender,
+            position_runtime=position_runtime,
+            odom_runtime=odom_runtime,
+            x=selected_pre_column_target["x"],
+            y=selected_pre_column_target["y"],
+            target_deg=target_yaw_deg,
+        )
+        if move_to_selected_pre_column_result is None:
+            results["move_to_selected_pre_column_result"] = (
+                move_to_selected_pre_column_result
+            )
+            return {
+                "completed": False,
+                "failed_step": "move_to_selected_pre_column",
+                **results,
+            }
+    results["move_to_selected_pre_column_result"] = move_to_selected_pre_column_result
+
+    selected_column_collision_result = move_lib.fb_till_collision(
+        sender=sender,
+        odom_runtime=odom_runtime,
+        direction=1,
+        value=400,
+        target_yaw_deg=target_yaw_deg,
+    )
+    results["selected_column_collision_result"] = selected_column_collision_result
+    if not selected_column_collision_result.get("completed", False):
+        return {
+            "completed": False,
+            "failed_step": "selected_column_collision",
+            **results,
+        }
+
+    selected_column_retreat_result = move_lib.drive_with_channels_for_duration(
+        sender=sender,
+        duration_sec=1.0,
+        forward_cmd=-100,
+        target_yaw_deg=target_yaw_deg,
+        brake_reverse_cmd=0,
+        brake_duration_sec=0.0,
+    )
+    results["selected_column_retreat_result"] = selected_column_retreat_result
+    if not selected_column_retreat_result.get("completed", False):
+        return {
+            "completed": False,
+            "failed_step": "selected_column_retreat",
+            **results,
+        }
+
+    release_kfs_result = kfs.release_kfs(sender)
+    results["release_kfs_result"] = release_kfs_result
+    if not release_kfs_result.get("completed", False):
+        return {
+            "completed": False,
+            "failed_step": "release_kfs",
+            "suck_count_after": int(kfs.suck_count),
+            **results,
+        }
+
+    move_to_pre_column2_result = move_to_des(
+        sender=sender,
+        position_runtime=position_runtime,
+        odom_runtime=odom_runtime,
+        x=pre_column2_target["x"],
+        y=pre_column2_target["y"],
+        target_deg=target_yaw_deg,
+    )
+    results["move_to_pre_column2_result"] = move_to_pre_column2_result
+    if move_to_pre_column2_result is None:
+        return {
+            "completed": False,
+            "failed_step": "move_to_pre_column2",
+            "suck_count_after": int(kfs.suck_count),
+            **results,
+        }
+
+    if extra_needed == 1:
+        zero_return_pose_result = kfs.kfs_zero_return_pose(sender)
+        results["zero_return_pose_result"] = zero_return_pose_result
+        if not zero_return_pose_result.get("completed", False):
+            return {
+                "completed": False,
+                "failed_step": "kfs_zero_return_pose",
+                "suck_count_after": int(kfs.suck_count),
+                **results,
+            }
+
+        kfs.suck_count = 3
+        extra_cylinder_selection_result = kfs.sucker_select_pf2(sender)
+        results["extra_cylinder_selection_result"] = extra_cylinder_selection_result
+
+        extra_suction_result = set_kfs_suction(
+            sender=sender,
+            suction_on=True,
+            pose_id=1,
+        )
+        results["extra_suction_result"] = extra_suction_result
+        if not extra_suction_result.get("completed", False):
+            return {
+                "completed": False,
+                "failed_step": "extra_pf2_suction",
+                "suck_count_after": int(kfs.suck_count),
+                **results,
+            }
+
+        high_score190_challenge_result = high_score190_challenge(
+            sender=sender,
+            position_runtime=position_runtime,
+            odom_runtime=odom_runtime,
+        )
+        results["high_score190_challenge_result"] = high_score190_challenge_result
+        completed = bool(high_score190_challenge_result.get("completed", False))
+        return {
+            "completed": completed,
+            "failed_step": (
+                None if completed else "high_score190_challenge"
+            ),
+            "suck_count_after": int(kfs.suck_count),
+            **results,
+        }
+
+    move_to_r1climb_before_pose_result = move_to_des(
+        sender=sender,
+        position_runtime=position_runtime,
+        odom_runtime=odom_runtime,
+        x=r1climb_target["x"],
+        y=r1climb_target["y"],
+        target_deg=target_yaw_deg,
+    )
+    results["move_to_r1climb_before_pose_result"] = move_to_r1climb_before_pose_result
+    if move_to_r1climb_before_pose_result is None:
+        return {
+            "completed": False,
+            "failed_step": "move_to_R1climb_before_pose",
+            "suck_count_after": int(kfs.suck_count),
+            **results,
+        }
+
+    sucker_release_pose_result = kfs.sucker_release_pose(sender)
+    results["sucker_release_pose_result"] = sucker_release_pose_result
+    if not sucker_release_pose_result.get("completed", False):
+        return {
+            "completed": False,
+            "failed_step": "sucker_release_pose",
+            "suck_count_after": int(kfs.suck_count),
+            **results,
+        }
+
+    place_3rd_kfs_pose_result = kfs.place_3rd_kfs_pose(sender)
+    results["place_3rd_kfs_pose_result"] = place_3rd_kfs_pose_result
+    if not place_3rd_kfs_pose_result.get("completed", False):
+        return {
+            "completed": False,
+            "failed_step": "place_3rd_kfs_pose",
+            "suck_count_after": int(kfs.suck_count),
+            **results,
+        }
+
+    move_to_r1climb_after_pose_result = move_to_des(
+        sender=sender,
+        position_runtime=position_runtime,
+        odom_runtime=odom_runtime,
+        x=r1climb_target["x"],
+        y=r1climb_target["y"],
+        target_deg=target_yaw_deg,
+    )
+    results["move_to_r1climb_after_pose_result"] = move_to_r1climb_after_pose_result
+    if move_to_r1climb_after_pose_result is None:
+        return {
+            "completed": False,
+            "failed_step": "move_to_R1climb_after_pose",
+            "suck_count_after": int(kfs.suck_count),
+            **results,
+        }
+
+    r1climb_collision_result = move_lib.fb_till_collision(
+        sender=sender,
+        odom_runtime=odom_runtime,
+        direction=1,
+        value=100,
+        target_yaw_deg=target_yaw_deg,
+    )
+    results["r1climb_collision_result"] = r1climb_collision_result
+    if not r1climb_collision_result.get("completed", False):
+        return {
+            "completed": False,
+            "failed_step": "R1climb_collision",
+            "suck_count_after": int(kfs.suck_count),
+            **results,
+        }
+
+    climb_r1_result = climb_R1(
+        sender=sender,
+        position_runtime=position_runtime,
+        odom_runtime=odom_runtime,
+        target_yaw_deg=target_yaw_deg,
+        stop_yaw_pid_after=False,
+    )
+    results["climb_r1_result"] = climb_r1_result
+    if not climb_r1_result.get("completed", False):
+        return {
+            "completed": False,
+            "failed_step": "climb_R1",
+            "suck_count_after": int(kfs.suck_count),
+            **results,
+        }
+
+    place_3rd_kfs_result = kfs.place_3rd_kfs(
+        sender=sender,
+        position_runtime=position_runtime,
+    )
+    results["place_3rd_kfs_result"] = place_3rd_kfs_result
+    completed = bool(place_3rd_kfs_result.get("completed", False))
+    return {
+        "completed": completed,
+        "failed_step": None if completed else "place_3rd_kfs",
+        "suck_count_after": int(kfs.suck_count),
+        **results,
+    }
+
+
 def totally_win(
     sender,
     position_runtime,
@@ -1830,9 +2422,9 @@ def totally_win(
     固定执行顺序：
       1. 检查 kfs.suck_count == 3
       2. 以 180deg 移动到 entrance9_<red/blue>
-      3. 以 180deg 移动到 R1climb_<red/blue>
-      4. 以 180deg 移动到 pre_column1_<red/blue>
-      5. 以 180deg 移动到 column2_<red/blue>
+      3. 以 180deg 移动到 pre_column2_<red/blue>
+      4. 保持 180deg，ch2=400 前进到柱位碰撞停止
+      5. 保持 180deg，ch2=-100 后退 1s
       6. 释放当前 KFS
       7. 等待 1.5s
       8. 以 180deg 返回 pre_column1_<red/blue>
@@ -1858,6 +2450,9 @@ def totally_win(
     pre_column1_coordinate_name = (
         "pre_column1_blue" if is_blue_field else "pre_column1_red"
     )
+    pre_column2_coordinate_name = (
+        "pre_column2_blue" if is_blue_field else "pre_column2_red"
+    )
     column2_coordinate_name = (
         "column2_blue" if is_blue_field else "column2_red"
     )
@@ -1874,6 +2469,10 @@ def totally_win(
         current_position_lib,
         pre_column1_coordinate_name,
     )
+    pre_column2_target = move_lib._get_corrected_battlefield_coordinate(
+        current_position_lib,
+        pre_column2_coordinate_name,
+    )
     column2_target = move_lib._get_corrected_battlefield_coordinate(
         current_position_lib,
         column2_coordinate_name,
@@ -1885,6 +2484,7 @@ def totally_win(
         "entrance9_coordinate_name": entrance9_coordinate_name,
         "r1climb_coordinate_name": r1climb_coordinate_name,
         "pre_column1_coordinate_name": pre_column1_coordinate_name,
+        "pre_column2_coordinate_name": pre_column2_coordinate_name,
         "column2_coordinate_name": column2_coordinate_name,
         "entrance9_target": {
             "raw_x": float(entrance9_target["raw_x"]),
@@ -1903,6 +2503,12 @@ def totally_win(
             "raw_y": float(pre_column1_target["raw_y"]),
             "x": float(pre_column1_target["x"]),
             "y": float(pre_column1_target["y"]),
+        },
+        "pre_column2_target": {
+            "raw_x": float(pre_column2_target["raw_x"]),
+            "raw_y": float(pre_column2_target["raw_y"]),
+            "x": float(pre_column2_target["x"]),
+            "y": float(pre_column2_target["y"]),
         },
         "column2_target": {
             "raw_x": float(column2_target["raw_x"]),
@@ -1936,51 +2542,50 @@ def totally_win(
             **results,
         }
 
-    move_to_r1climb_result = move_to_des(
+    move_to_pre_column2_result = move_to_des(
         sender=sender,
         position_runtime=position_runtime,
         odom_runtime=odom_runtime,
-        x=r1climb_target["x"],
-        y=r1climb_target["y"],
+        x=pre_column2_target["x"],
+        y=pre_column2_target["y"],
         target_deg=target_yaw_deg,
     )
-    results["move_to_r1climb_result"] = move_to_r1climb_result
-    if move_to_r1climb_result is None:
+    results["move_to_pre_column2_result"] = move_to_pre_column2_result
+    if move_to_pre_column2_result is None:
         return {
             "completed": False,
-            "failed_step": "move_to_R1climb",
+            "failed_step": "move_to_pre_column2",
             **results,
         }
 
-    move_to_pre_column1_result = move_to_des(
+    column2_collision_result = move_lib.fb_till_collision(
         sender=sender,
-        position_runtime=position_runtime,
         odom_runtime=odom_runtime,
-        x=pre_column1_target["x"],
-        y=pre_column1_target["y"],
-        target_deg=target_yaw_deg,
+        direction=1,
+        value=400,
+        target_yaw_deg=target_yaw_deg,
     )
-    results["move_to_pre_column1_result"] = move_to_pre_column1_result
-    if move_to_pre_column1_result is None:
+    results["column2_collision_result"] = column2_collision_result
+    if not column2_collision_result.get("completed", False):
         return {
             "completed": False,
-            "failed_step": "move_to_pre_column1",
+            "failed_step": "column2_collision",
             **results,
         }
 
-    move_to_column2_result = move_to_des(
+    column2_retreat_result = move_lib.drive_with_channels_for_duration(
         sender=sender,
-        position_runtime=position_runtime,
-        odom_runtime=odom_runtime,
-        x=column2_target["x"],
-        y=column2_target["y"],
-        target_deg=target_yaw_deg,
+        duration_sec=1.0,
+        forward_cmd=-100,
+        target_yaw_deg=target_yaw_deg,
+        brake_reverse_cmd=0,
+        brake_duration_sec=0.0,
     )
-    results["move_to_column2_result"] = move_to_column2_result
-    if move_to_column2_result is None:
+    results["column2_retreat_result"] = column2_retreat_result
+    if not column2_retreat_result.get("completed", False):
         return {
             "completed": False,
-            "failed_step": "move_to_column2",
+            "failed_step": "column2_retreat",
             **results,
         }
 
@@ -2498,6 +3103,11 @@ def execute_action_row(
     next_from_pose = _action_value_to_int(next_from_pose, "next_from_pose")
     next_to_pose = _action_value_to_int(next_to_pose, "next_to_pose")
     next_height_action = _action_value_to_int(next_height_action, "next_height_action")
+    no_next_action = (
+        next_from_pose == 0
+        and next_to_pose == 0
+        and next_height_action == 0
+    )
     high_stair_long_adjust = _action_value_to_int(
         high_stair_long_adjust,
         "high_stair_long_adjust",
@@ -2573,6 +3183,7 @@ def execute_action_row(
         "next_from_pose": int(next_from_pose),
         "next_to_pose": int(next_to_pose),
         "next_height_action": int(next_height_action),
+        "no_next_action": bool(no_next_action),
         "high_stair_long_adjust": int(high_stair_long_adjust),
         "skip_pre_climb_adjust": bool(skip_pre_climb_adjust),
         "inferred_direction": int(inferred_direction),
@@ -2686,6 +3297,19 @@ def execute_action_row(
 
             result["next_inferred_direction"] = int(next_inferred_direction)
             result["next_height_relation"] = int(next_height_relation)
+            if no_next_action:
+                result["return_center_result"] = None
+                result["return_center_skipped"] = True
+                result["return_center_skip_reason"] = "no_next_action"
+                result["final_rotate_yaw_deg"] = float(
+                    tools.direction_int_to_yaw_deg(final_direction)
+                )
+                result["final_rotation_required"] = False
+                result["final_rotate_result"] = None
+                result["completed"] = True
+                result["implemented"] = True
+                result["failed_step"] = None
+                return result
             if should_skip_return_center:
                 result["return_center_skip_reason"] = "next_climb_to_same_target"
                 result["skip_pre_climb_adjust_for_next_row"] = True
@@ -2752,6 +3376,9 @@ def execute_action_row(
 
             return_to_center = True
             return_center_skip_reason = None
+            if no_next_action:
+                return_to_center = False
+                return_center_skip_reason = "no_next_action"
             next_stair_inferred_direction = tools.stair_id_to_direction(
                 next_from_pose,
                 next_to_pose,
@@ -2838,12 +3465,12 @@ def execute_action_matrix(
 
     action_matrix: n*5，每行格式同 execute_action_row()。
     final_direction: 没有下一行有效移动时使用的默认最终朝向。
-      None 时使用 180deg 对应方向码 2。
+      None 时使用 -90deg 对应方向码 4。
     stop_on_unimplemented: 遇到 execute_action_row() 返回 implemented=False 时是否终止。
     stop_on_failed: 遇到已实现但 completed=False 的动作行时是否终止。
     """
     if final_direction is None:
-        final_direction = 2
+        final_direction = 4
     final_direction = _action_value_to_int(final_direction, "final_direction")
     if final_direction not in (1, 2, 3, 4):
         print(
@@ -2858,6 +3485,7 @@ def execute_action_matrix(
     failed_row_index = None
     failure_reason = None
     meilin_prepare_result = None
+    final_retreat_result = None
 
     if row_count > 0:
         first_row_values = _action_row_to_list(rows[0])
@@ -3002,8 +3630,18 @@ def execute_action_matrix(
                 )
                 break
 
+    matrix_completed = failed_row_index is None and len(results) == row_count
+    if matrix_completed and row_count > 0:
+        final_retreat_result = move_lib.drive_with_channels_for_duration(
+            sender=sender,
+            duration_sec=1.5,
+            forward_cmd=-100,
+            target_yaw_deg=-90.0,
+            brake_duration_sec=0.0,
+        )
+
     return {
-        "completed": failed_row_index is None and len(results) == row_count,
+        "completed": matrix_completed,
         "row_count": row_count,
         "executed_row_count": len(results),
         "final_direction": int(final_direction),
@@ -3011,5 +3649,6 @@ def execute_action_matrix(
         "failed_row_index": failed_row_index,
         "failure_reason": failure_reason,
         "meilin_prepare_result": meilin_prepare_result,
+        "final_retreat_result": final_retreat_result,
         "results": results,
     }

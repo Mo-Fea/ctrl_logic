@@ -42,7 +42,7 @@ DEFAULT_COLLISION_SPEED_FLOOR_MPS = 0.05
 # 碰撞移动：速度降到该阈值及以下认为接近 0，单位 m/s。
 DEFAULT_COLLISION_STOP_SPEED_MPS = 0.02
 # 碰撞移动：接近 0 需要连续确认的帧数。
-DEFAULT_COLLISION_CONFIRM_FRAME_COUNT = 5
+DEFAULT_COLLISION_CONFIRM_FRAME_COUNT = 2
 # 移动到点主控制循环周期，单位 s。
 DEFAULT_MOVE_LOOP_INTERVAL_SEC = 0.02
 # 移动/位置保持闭环可接受的 odom 最大年龄，超过后不再使用角速度做 yaw 预测。
@@ -108,7 +108,7 @@ DEFAULT_CLIMB_TRIGGER_HOLD_SEC = 0.3
 # 上楼梯触发前用于形成 1 -> 3 上升沿的预置时间，单位 s。
 DEFAULT_CLIMB_TRIGGER_ARM_SEC = 0.1
 # 上楼梯触发完成后的固定等待时间，单位 s。
-DEFAULT_CLIMB_POST_TRIGGER_DELAY_SEC = 3.2
+DEFAULT_CLIMB_POST_TRIGGER_DELAY_SEC = 3.0
 # 上楼梯流程最大允许时间，超过该时间后打印错误并终止程序，单位 s。
 DEFAULT_CLIMB_TIMEOUT_SEC = 15.0
 # 下楼梯触发通道保持时间，单位 s。
@@ -231,7 +231,12 @@ def wait_until_direction_reached(
 
 
 def encode_target_yaw_i16(target_yaw_deg):
-    target_yaw_i16 = tools.yaw_deg_to_i16(float(target_yaw_deg))
+    # target_yaw_deg is the field-logic yaw; convert it to the lower-controller yaw.
+    target_yaw_deg = float(target_yaw_deg)
+    yaw_converter = getattr(position_lib, "logic_yaw_to_control_yaw_deg", None)
+    if yaw_converter is not None:
+        target_yaw_deg = yaw_converter(target_yaw_deg)
+    target_yaw_i16 = tools.yaw_deg_to_i16(target_yaw_deg)
     if target_yaw_i16 == 0:
         return 1
     return target_yaw_i16
@@ -965,6 +970,53 @@ def _till_collision(
     )
 
 
+def block_till_pressure(
+    sender,
+    boundary,
+    mode=0,
+    loop_interval_sec=DEFAULT_DRIVE_LOOP_INTERVAL_SEC,
+):
+    """
+    阻塞等待压力值跨过边界。
+
+    mode=0: 最新 pressure < boundary 时退出。
+    mode=1: 最新 pressure > boundary 时退出。
+    """
+    mode = int(mode)
+    if mode not in (0, 1):
+        raise ValueError(f"mode must be 0 or 1, got {mode}")
+
+    boundary = float(boundary)
+    loop_interval_sec = float(loop_interval_sec)
+    if loop_interval_sec <= 0.0:
+        raise ValueError(f"loop_interval_sec must be > 0, got {loop_interval_sec}")
+
+    sample_count = 0
+    latest_pressure = None
+    started_at = tools.time.time()
+
+    while True:
+        latest_pressure = sender.get_pressure()
+        if latest_pressure is not None:
+            latest_pressure = float(latest_pressure)
+            sample_count += 1
+            if mode == 0 and latest_pressure < boundary:
+                break
+            if mode == 1 and latest_pressure > boundary:
+                break
+
+        tools.time.sleep(loop_interval_sec)
+
+    return {
+        "completed": True,
+        "boundary": float(boundary),
+        "mode": int(mode),
+        "latest_pressure": latest_pressure,
+        "sample_count": int(sample_count),
+        "elapsed_sec": float(tools.time.time() - started_at),
+    }
+
+
 def distance_to_target_xy(current_x, current_y, target_x, target_y):
     dx = float(target_x) - float(current_x)
     dy = float(target_y) - float(current_y)
@@ -1055,7 +1107,10 @@ def world_error_to_fixed_body(dx, dy, fixed_yaw_deg):
     sin_yaw = math.sin(yaw_rad)
 
     forward_error = cos_yaw * float(dx) + sin_yaw * float(dy)
-    lateral_error = -sin_yaw * float(dx) + cos_yaw * float(dy)
+    if position_backend.is_blue_field():
+        lateral_error = sin_yaw * float(dx) - cos_yaw * float(dy)
+    else:
+        lateral_error = -sin_yaw * float(dx) + cos_yaw * float(dy)
     return lateral_error, forward_error
 
 
@@ -1294,7 +1349,8 @@ def enter_battlefield(
     position_runtime,
     odom_runtime,
     cruise_forward_cmd=DEFAULT_MOVE_FORWARD_CMD,
-    collision_forward_cmd=800,
+    entrance_forward_cmd=400,
+    target_yaw_deg=180.0,
     timeout_sec=None,
     reference="robot",
     **kwargs,
@@ -1303,9 +1359,8 @@ def enter_battlefield(
     进入九宫格/战场区域。
 
     流程：
-      1. 以 90deg 移动到 pre_entrance9_<red/blue>
-      2. 保持该目标角，ch2=800 前进直到碰撞
-      3. 以 180deg 移动到 entrance9_<red/blue>
+      1. 以 -90deg 移动到 pre_entrance9_<red/blue>
+      2. 以 -90deg、ch2=400 移动到 entrance9_<red/blue>
 
     坐标按当前半场从 position 后端选择。
     """
@@ -1318,7 +1373,8 @@ def enter_battlefield(
         pre_coordinate_name = "pre_entrance9_red"
         entrance_coordinate_name = "entrance9_red"
         field_name = "red"
-    pre_target_yaw_deg = 90.0
+    target_yaw_deg = normalize_yaw_deg(float(target_yaw_deg))
+    pre_target_yaw_deg = -90.0
 
     pre_target = _get_corrected_battlefield_coordinate(
         current_position_lib,
@@ -1332,7 +1388,7 @@ def enter_battlefield(
     pre_target_y = pre_target["y"]
     entrance_target_x = entrance_target["x"]
     entrance_target_y = entrance_target["y"]
-    entrance_target_yaw_deg = 180.0
+    entrance_target_yaw_deg = -90.0
 
     pre_move_result = move_to_target(
         sender=sender,
@@ -1354,8 +1410,10 @@ def enter_battlefield(
             "completed": False,
             "failed_step": "move_to_pre_entrance9",
             "field_name": field_name,
+            "target_yaw_deg": float(target_yaw_deg),
             "pre_target_yaw_deg": float(pre_target_yaw_deg),
             "entrance_target_yaw_deg": float(entrance_target_yaw_deg),
+            "entrance_forward_cmd": int(entrance_forward_cmd),
             "pre_target": {
                 "coordinate_name": pre_coordinate_name,
                 "raw_x": float(pre_target["raw_x"]),
@@ -1373,50 +1431,6 @@ def enter_battlefield(
                 "correction_yaw_deg": float(entrance_target["correction_yaw_deg"]),
             },
             "pre_move_result": pre_move_result,
-            "collision_result": None,
-            "entrance_move_result": None,
-        }
-
-    set_motion_channels(
-        sender,
-        des_yaw_i16=encode_target_yaw_i16(pre_target_yaw_deg),
-    )
-    collision_result = fb_till_collision(
-        sender=sender,
-        odom_runtime=odom_runtime,
-        direction=1,
-        value=collision_forward_cmd,
-    )
-    collision_completed = bool(
-        collision_result is not None
-        and collision_result.get("completed", False)
-    )
-    if not collision_completed:
-        return {
-            "completed": False,
-            "failed_step": "pre_entrance9_collision",
-            "field_name": field_name,
-            "pre_target_yaw_deg": float(pre_target_yaw_deg),
-            "entrance_target_yaw_deg": float(entrance_target_yaw_deg),
-            "collision_forward_cmd": int(collision_forward_cmd),
-            "pre_target": {
-                "coordinate_name": pre_coordinate_name,
-                "raw_x": float(pre_target["raw_x"]),
-                "raw_y": float(pre_target["raw_y"]),
-                "x": float(pre_target_x),
-                "y": float(pre_target_y),
-                "correction_yaw_deg": float(pre_target["correction_yaw_deg"]),
-            },
-            "entrance_target": {
-                "coordinate_name": entrance_coordinate_name,
-                "raw_x": float(entrance_target["raw_x"]),
-                "raw_y": float(entrance_target["raw_y"]),
-                "x": float(entrance_target_x),
-                "y": float(entrance_target_y),
-                "correction_yaw_deg": float(entrance_target["correction_yaw_deg"]),
-            },
-            "pre_move_result": pre_move_result,
-            "collision_result": collision_result,
             "entrance_move_result": None,
         }
 
@@ -1427,7 +1441,7 @@ def enter_battlefield(
         target_x=entrance_target_x,
         target_y=entrance_target_y,
         final_target_yaw_deg=entrance_target_yaw_deg,
-        cruise_forward_cmd=cruise_forward_cmd,
+        cruise_forward_cmd=entrance_forward_cmd,
         timeout_sec=timeout_sec,
         reference=reference,
         **kwargs,
@@ -1440,9 +1454,10 @@ def enter_battlefield(
         "completed": bool(entrance_completed),
         "failed_step": None if entrance_completed else "move_to_entrance9",
         "field_name": field_name,
+        "target_yaw_deg": float(target_yaw_deg),
         "pre_target_yaw_deg": float(pre_target_yaw_deg),
         "entrance_target_yaw_deg": float(entrance_target_yaw_deg),
-        "collision_forward_cmd": int(collision_forward_cmd),
+        "entrance_forward_cmd": int(entrance_forward_cmd),
         "pre_target": {
             "coordinate_name": pre_coordinate_name,
             "raw_x": float(pre_target["raw_x"]),
@@ -1460,7 +1475,6 @@ def enter_battlefield(
             "correction_yaw_deg": float(entrance_target["correction_yaw_deg"]),
         },
         "pre_move_result": pre_move_result,
-        "collision_result": collision_result,
         "entrance_move_result": entrance_move_result,
     }
 
@@ -1610,6 +1624,7 @@ def side_suck_movement(
 
     移动逻辑：
       - 先读取当前半场编号 -1 台阶坐标。
+      - 侧吸方向固定按红场语义，不按蓝场镜像交换。
       - target_stair_id=1:
           移动到 (x - 0.6, y)。
       - target_stair_id=3:
@@ -1626,13 +1641,14 @@ def side_suck_movement(
         )
 
     target_direction = 1
-    lateral_sign = -1 if target_stair_id == 1 else 1
-
     target_yaw_deg = tools.direction_int_to_yaw_deg(target_direction)
-    base_x, base_y = position_resource.get_stair_xy_for_angle(
-        -1,
-        target_yaw_deg,
+    side_info = get_side_suck_target_side(
+        target_stair_id=target_stair_id,
+        target_yaw_deg=target_yaw_deg,
     )
+    base_x = side_info["base_x"]
+    base_y = side_info["base_y"]
+    lateral_sign = side_info["lateral_sign"]
     lateral_distance = abs(float(lateral_distance))
 
     target_x = float(base_x) + float(lateral_sign) * lateral_distance
@@ -1665,6 +1681,10 @@ def side_suck_movement(
             "target_y": float(target_y),
             "target_direction": int(target_direction),
             "target_yaw_deg": float(target_yaw_deg),
+            "target_stair_x": float(side_info["target_stair_x"]),
+            "target_stair_y": float(side_info["target_stair_y"]),
+            "movement_direction": side_info["movement_direction"],
+            "is_blue_field": bool(side_info["is_blue_field"]),
             "lateral_distance": float(lateral_distance),
             "lateral_sign": int(lateral_sign),
             "side_move_result": side_move_result,
@@ -1694,6 +1714,10 @@ def side_suck_movement(
         "target_y": float(target_y),
         "target_direction": int(target_direction),
         "target_yaw_deg": float(target_yaw_deg),
+        "target_stair_x": float(side_info["target_stair_x"]),
+        "target_stair_y": float(side_info["target_stair_y"]),
+        "movement_direction": side_info["movement_direction"],
+        "is_blue_field": bool(side_info["is_blue_field"]),
         "lateral_distance": float(lateral_distance),
         "lateral_sign": int(lateral_sign),
         "adjust_forward_cmd": int(adjust_forward_cmd),
@@ -1701,6 +1725,45 @@ def side_suck_movement(
         "adjust_until_collision": False,
         "side_move_result": side_move_result,
         "adjust_drive_result": adjust_drive_result,
+    }
+
+
+def get_side_suck_target_side(target_stair_id, target_yaw_deg=None):
+    """
+    返回侧吸 1/3 的红场语义方向。
+
+    侧吸动作层不做红蓝半场区分：1 永远对应 -x 侧，3 永远对应 +x 侧。
+    基准 -1 坐标仍取当前半场实际坐标，保证蓝场不会跑到红场物理点。
+    """
+    target_stair_id = int(target_stair_id)
+    if target_stair_id not in (1, 3):
+        raise ValueError(
+            f"target_stair_id must be 1 or 3, got {target_stair_id}"
+        )
+
+    if target_yaw_deg is None:
+        target_yaw_deg = tools.direction_int_to_yaw_deg(1)
+    else:
+        target_yaw_deg = normalize_yaw_deg(float(target_yaw_deg))
+
+    base_x, base_y = position_resource.get_stair_xy_for_angle(
+        -1,
+        target_yaw_deg,
+    )
+    lateral_sign = -1 if target_stair_id == 1 else 1
+    target_stair_x = float(base_x) + float(lateral_sign)
+    target_stair_y = float(base_y)
+    return {
+        "target_stair_id": int(target_stair_id),
+        "target_yaw_deg": float(target_yaw_deg),
+        "base_x": float(base_x),
+        "base_y": float(base_y),
+        "target_stair_x": float(target_stair_x),
+        "target_stair_y": float(target_stair_y),
+        "lateral_sign": int(lateral_sign),
+        "movement_direction": "right" if lateral_sign > 0 else "left",
+        "is_blue_field": bool(position_backend.is_blue_field()),
+        "logic_field": "red",
     }
 
 
@@ -1716,14 +1779,13 @@ def side_suck_lateral_movement(
 
     target_stair_id:
       只能为 1 或 3。
-      - 1: 向左平移。
-      - 3: 向右平移。
+      固定按红场语义判断目标 1/3 在 -1 左侧还是右侧。
 
     默认平移通道绝对值和时间由全局量控制：
       - DEFAULT_SIDE_SUCK_LATERAL_CMD_ABS
       - DEFAULT_SIDE_SUCK_LATERAL_DURATION_SEC
 
-    按当前底盘 ch0 符号约定：
+    按当前底盘 ch0 符号约定，目标编号不做蓝场镜像：
       - 左移: lateral_cmd = -abs(lateral_cmd_abs)
       - 右移: lateral_cmd = +abs(lateral_cmd_abs)
     """
@@ -1738,8 +1800,9 @@ def side_suck_lateral_movement(
     if duration_sec < 0.0:
         raise ValueError(f"duration_sec must be >= 0, got {duration_sec}")
 
-    lateral_cmd = -lateral_cmd_abs if target_stair_id == 1 else lateral_cmd_abs
-    movement_direction = "left" if target_stair_id == 1 else "right"
+    side_info = get_side_suck_target_side(target_stair_id=target_stair_id)
+    lateral_cmd = int(side_info["lateral_sign"]) * lateral_cmd_abs
+    movement_direction = side_info["movement_direction"]
 
     drive_result = drive_with_channels_for_duration(
         sender=sender,
@@ -1774,7 +1837,11 @@ def side_suck_lateral_movement(
         ),
         "target_stair_id": int(target_stair_id),
         "movement_direction": movement_direction,
-        "is_blue_field": bool(position_backend.is_blue_field()),
+        "is_blue_field": bool(side_info["is_blue_field"]),
+        "target_stair_x": float(side_info["target_stair_x"]),
+        "target_stair_y": float(side_info["target_stair_y"]),
+        "base_x": float(side_info["base_x"]),
+        "base_y": float(side_info["base_y"]),
         "lateral_cmd_abs": int(lateral_cmd_abs),
         "lateral_cmd": int(lateral_cmd),
         "duration_sec": float(duration_sec),
@@ -2411,6 +2478,79 @@ def descend(
             })
             if height_reached:
                 return result
+
+        tools.time.sleep(loop_interval_sec)
+
+
+def uodown_detection(
+    position_runtime,
+    mode=0,
+    height_delta=0.015,
+    loop_interval_sec=DEFAULT_DRIVE_LOOP_INTERVAL_SEC,
+):
+    """
+    阻塞式检测 Z 轴相对极值变化。
+
+    mode=0: 实时记录最小 z，current_z - min_z > height_delta 后返回。
+    mode=1: 实时记录最大 z，max_z - current_z > height_delta 后返回。
+    """
+    try:
+        mode = int(mode)
+    except (TypeError, ValueError):
+        raise ValueError(f"mode must be 0 or 1, got {mode!r}")
+    if mode not in (0, 1):
+        raise ValueError(f"mode must be 0 or 1, got {mode}")
+
+    height_delta = float(height_delta)
+    if height_delta <= 0.0:
+        raise ValueError(f"height_delta must be > 0, got {height_delta}")
+
+    loop_interval_sec = float(loop_interval_sec)
+    if loop_interval_sec <= 0.0:
+        raise ValueError(
+            f"loop_interval_sec must be > 0, got {loop_interval_sec}"
+        )
+
+    tracked_z = None
+    current_z = None
+    delta_z = 0.0
+    sample_count = 0
+
+    while True:
+        current_position = position_runtime.get_current_position()
+        if current_position is None:
+            tools.time.sleep(loop_interval_sec)
+            continue
+
+        current_z = float(current_position["z"])
+        sample_count += 1
+
+        if tracked_z is None:
+            tracked_z = current_z
+
+        if mode == 0:
+            if current_z < tracked_z:
+                tracked_z = current_z
+            delta_z = current_z - tracked_z
+            reached = delta_z > height_delta
+            tracked_name = "min_z"
+        else:
+            if current_z > tracked_z:
+                tracked_z = current_z
+            delta_z = tracked_z - current_z
+            reached = delta_z > height_delta
+            tracked_name = "max_z"
+
+        if reached:
+            return {
+                "completed": True,
+                "mode": int(mode),
+                "height_delta": float(height_delta),
+                "current_z": float(current_z),
+                tracked_name: float(tracked_z),
+                "delta_z": float(delta_z),
+                "sample_count": int(sample_count),
+            }
 
         tools.time.sleep(loop_interval_sec)
 

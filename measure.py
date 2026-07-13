@@ -4,7 +4,9 @@ import time
 
 import rclpy
 
+from lib2 import position_backend
 from lib2 import position_odin
+from lib2 import tools
 
 
 def normalize_yaw_deg(yaw_deg):
@@ -42,7 +44,31 @@ def parse_args():
         default=0.25,
         help="Maximum accepted TF cache age in seconds.",
     )
+    parser.add_argument(
+        "--field",
+        choices=("red", "blue", "1", "2"),
+        default=None,
+        help="Field half used for printed coordinates: red/1 or blue/2.",
+    )
     return parser.parse_args()
+
+
+def configure_field(field):
+    if field in ("red", "1"):
+        position_backend.set_field_type(position_backend.FIELD_TYPE_RED)
+        return "red"
+    position_backend.set_field_type(position_backend.FIELD_TYPE_BLUE)
+    return "blue"
+
+
+def prompt_field():
+    while True:
+        field = input("请选择当前半场（1=red/right，2=blue/left）：").strip().lower()
+        if field in ("red", "r", "1"):
+            return "red"
+        if field in ("blue", "b", "2"):
+            return "blue"
+        print("输入无效，请输入 1/red 或 2/blue")
 
 
 def main():
@@ -54,9 +80,20 @@ def main():
     if args.max_age <= 0.0:
         raise ValueError(f"max_age must be > 0, got {args.max_age}")
 
+    field_name = configure_field(args.field if args.field is not None else prompt_field())
+
     if not rclpy.ok():
         rclpy.init()
 
+    tools.relocalization_flag = False
+    tools.odometry_mode_flag = False
+    tools.localization_mode_received = False
+    _, flag_node, flag_thread, flag_stop_event = tools.relocalization_conformation()
+    while rclpy.ok() and not tools.localization_mode_received:
+        time.sleep(0.01)
+    if not rclpy.ok():
+        tools.destroy_ros2_thread(flag_node, flag_thread, flag_stop_event)
+        return
     tf_node = position_odin.TfCacheNode(
         base_frame=args.base_frame,
         update_hz=args.tf_hz,
@@ -78,7 +115,6 @@ def main():
                 clock=tf_node.get_clock(),
             )
             if lidar_pose is None:
-                print("waiting for valid odin TF...")
                 time.sleep(args.interval)
                 continue
 
@@ -89,12 +125,10 @@ def main():
                 position_odin.radians_to_degrees(robot_pose["yaw"])
             )
             print(
-                "robot "
                 f"x={robot_pose['x']:.4f} m, "
                 f"y={robot_pose['y']:.4f} m, "
                 f"z={robot_pose['z']:.4f} m, "
-                f"yaw={yaw_deg:.2f} deg, "
-                f"tf_age={lidar_pose.get('age_sec', 0.0):.3f} s"
+                f"yaw={yaw_deg:.2f} deg"
             )
             time.sleep(args.interval)
     except KeyboardInterrupt:
@@ -103,6 +137,7 @@ def main():
         stop_event.set()
         tf_thread.join(timeout=1.0)
         tf_node.destroy_node()
+        tools.destroy_ros2_thread(flag_node, flag_thread, flag_stop_event)
         if rclpy.ok():
             rclpy.shutdown()
 

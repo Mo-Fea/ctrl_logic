@@ -9,19 +9,62 @@ from tf2_msgs.msg import TFMessage
 import math
 
 from lib2 import position_backend
+from lib2 import tools
 
 
-entrance_x0_red = 3.161
-entrance_y0_red = 1.741
+side_9 = 0.54
+weapon_side = 0.2
 
-entrance_x90_red = 3.098
-entrance_y90_red = 1.770
 
-entrance_xneg90_red = 3.137
-entrance_yneg90_red = 1.693
 
-entrance_x180_red = 3.081
-entrance_y180_red = 1.717
+entrance_x0_red = 1.9331
+entrance_y0_red = 3.1187
+
+entrance_x90_red = 1.8677
+entrance_y90_red = 3.1417
+
+entrance_xneg90_red = 1.9133
+entrance_yneg90_red = 3.0718
+
+entrance_x180_red = 1.8493
+entrance_y180_red = 3.0828
+
+weapon_x_red = -1.0134
+weapon_y_red = -0.324
+
+# 九宫格区域坐标占位（二维坐标，待实测后替换）
+pre_entrance9_red = (4.124, 8.2674)
+entrance9_red = (4.124, 10.579)
+column2_x_red = -0.7680
+column2_y_red = 10.0
+pre_x_red = 1.6189   
+R1climb_red = (1.6189, 9.2321)
+
+#--------------------------------------------------------------------------------------------------------------
+# Left field placeholders. Fill these with measured coordinates from the real field.
+entrance_x0_blue = 1.9331
+entrance_y0_blue = 3.1187
+
+entrance_x90_blue = 1.8677
+entrance_y90_blue = 3.1417
+
+entrance_xneg90_blue = 1.7393
+entrance_yneg90_blue = 3.0718
+
+entrance_x180_blue = 1.8493
+entrance_y180_blue = 3.0828
+
+weapon_x_blue = -1.0134
+weapon_y_blue = -0.324
+
+pre_entrance9_blue = (4.124, 8.2674)
+entrance9_blue = (4.124, 10.579)
+column2_x_blue = -0.7680
+column2_y_blue = 10.0
+pre_x_blue = 1.6189                   
+R1climb_blue = (1.6189, 9.2321)
+
+
 ENTRANCE_X0_RED = entrance_x0_red
 ENTRANCE_X90_RED = entrance_x90_red
 ENTRANCE_XNEG90_RED = entrance_xneg90_red
@@ -32,42 +75,24 @@ ENTRANCE_YNEG90_RED = entrance_yneg90_red
 ENTRANCE_Y180_RED = entrance_y180_red
 ENTRANCE_X_RED = ENTRANCE_X0_RED
 ENTRANCE_Y_RED = ENTRANCE_Y0_RED
-PRE_ENTRANCE_X_RED = 0.500
-PRE_ENTRANCE_Y_RED = 1.776
+
+
+weapon_side = 0.2
 WEAPON_TARGETS_RED = {
-    1: (0.142, -1.320),
-    2: (0.142, -1.120),
-    3: (0.142, -0.920),
-    4: (0.142, -0.720),
-    5: (0.142, -0.520),
-    6: (1.147, -1.145),
+    weapon_id: (weapon_x_red, weapon_y_red + (weapon_id - 1) * weapon_side)
+    for weapon_id in range(1, 7)
 }
 WEAPON_RETREAT_STOP_Y_RED = -4.00
 
-# 九宫格区域坐标占位（二维坐标，待实测后替换）
-pre_entrance9_red = (4.995, 6.927)
-entrance9_red = (4.995, 9.228)
-column1_red = (0.6, 8.0)
-pre_column1_red = (3.7748, 7.8218)
-column2_red = (0.570, 8.532)
-column3_red = (0.0, 0.0)
-pre_R1climb_red = (3.450,9.241)
-pre_climb_R1_red = pre_R1climb_red
-R1climb_red = (3.450, 9.241)
+column1_red = (column2_x_red, column2_y_red - side_9)
+column2_red = (column2_x_red, column2_y_red)
+column3_red = (column2_x_red, column2_y_red + side_9)
+pre_column1_red = (pre_x_red, column1_red[1])
+pre_column2_red = (pre_x_red, column2_red[1])
+pre_column3_red = (pre_x_red, column3_red[1])
 
 
-# Left field placeholders. Fill these with measured coordinates from the real field.
-entrance_x0_blue = 2.530
-entrance_y0_blue = -2.216
 
-entrance_x90_blue = 2.469
-entrance_y90_blue = -2.1985
-
-entrance_xneg90_blue = 2.455
-entrance_yneg90_blue = -2.264
-
-entrance_x180_blue = 2.423
-entrance_y180_blue = -2.231
 ENTRANCE_X0_BLUE = entrance_x0_blue
 ENTRANCE_X90_BLUE = entrance_x90_blue
 ENTRANCE_XNEG90_BLUE = entrance_xneg90_blue
@@ -78,37 +103,24 @@ ENTRANCE_YNEG90_BLUE = entrance_yneg90_blue
 ENTRANCE_Y180_BLUE = entrance_y180_blue
 ENTRANCE_X_BLUE = ENTRANCE_X0_BLUE
 ENTRANCE_Y_BLUE = ENTRANCE_Y0_BLUE
-PRE_ENTRANCE_X_BLUE = 0.500
-PRE_ENTRANCE_Y_BLUE = -1.776
+
+
+
 WEAPON_TARGETS_BLUE = {
-    1: (-0.0964, -0.713),
-    2: (-0.0964, -0.513),
-    3: (-0.0964, -0.313),
-    4: (-0.0964, -0.113),
-    5: (-0.0964, 0.113),
-    6: (1.793, 1.150),
+    weapon_id: (weapon_x_blue, weapon_y_blue + (weapon_id - 1) * weapon_side)
+    for weapon_id in range(1, 7)
 }
 WEAPON_RETREAT_STOP_Y_BLUE = 4.00
 
-pre_entrance9_blue = (4.7577, -7.0424)
-entrance9_blue = (-4.5354, -9.6278)
-column1_blue = (0.6638, -8.5115)
-pre_column1_blue = (3.4815, -8.4516)
-column2_blue = (0.6638, -9.0415)
-column3_blue = (0.0, 0.0)
-pre_R1climb_blue = (0.0, 0.0)
-pre_climb_R1_blue = pre_R1climb_blue
-R1climb_blue = (3.6155, -9.6564)
+column1_blue = (column2_x_blue, column2_y_blue - side_9)
+column2_blue = (column2_x_blue, column2_y_blue)
+column3_blue = (column2_x_blue, column2_y_blue + side_9)
+pre_column1_blue = (pre_x_blue, column1_blue[1])
+pre_column2_blue = (pre_x_blue, column2_blue[1])
+pre_column3_blue = (pre_x_blue, column3_blue[1])
 
 
-# Backward-compatible defaults: current main flow still uses red/right field.
-ENTRANCE_X = ENTRANCE_X_RED
-ENTRANCE_Y = ENTRANCE_Y_RED
-PRE_ENTRANCE_X = PRE_ENTRANCE_X_RED
-PRE_ENTRANCE_Y = PRE_ENTRANCE_Y_RED
-WEAPON_TARGETS = WEAPON_TARGETS_RED
-WEAPON_RETREAT_STOP_Y = WEAPON_RETREAT_STOP_Y_RED
-pre_column1 = pre_column1_red
+
 
 
 def _select_field_value(red_value, blue_value):
@@ -194,8 +206,11 @@ class TfCacheNode(Node):
         self.period = 1.0 / max(1e-6, float(update_hz))
 
         self._lock = threading.Lock()
-        self._latest_synced_pair = None
+        self._latest_synced_pair = None 
         self._stamp = 0.0
+        self._latest_odom_base = None
+        self._latest_odom_base_stamp_sec = None
+        self._latest_odom_base_cache_stamp = 0.0
         self._pending_pairs = {}
         self._max_pending_pairs = 128
         self._max_pending_age_sec = float(max_pending_age_sec)
@@ -283,6 +298,19 @@ class TfCacheNode(Node):
                 stamp_sec = self._key_to_sec(key)
                 if self._latest_tf_stamp_sec is None or stamp_sec > self._latest_tf_stamp_sec:
                     self._latest_tf_stamp_sec = stamp_sec
+
+                if field_name == "tf_odom_base":
+                    if (
+                        self._latest_odom_base_stamp_sec is None
+                        or stamp_sec >= self._latest_odom_base_stamp_sec
+                    ):
+                        self._latest_odom_base = {
+                            "T_odom_base": transform_to_matrix(transform),
+                            "stamp_msg": transform.header.stamp,
+                        }
+                        self._latest_odom_base_stamp_sec = stamp_sec
+                        self._latest_odom_base_cache_stamp = time.time()
+
                 pair = self._pending_pairs.setdefault(key, {})
                 pair[field_name] = transform
                 self._try_finalize_pair_locked(key)
@@ -302,6 +330,22 @@ class TfCacheNode(Node):
                 self._latest_synced_pair["T_odom_base"].copy(),
                 self._latest_synced_pair["stamp_msg"],
                 self._stamp,
+            )
+
+    def get_latest_odom_to_base(self):
+        """
+        获取最新 odom -> base_frame 变换，不要求同时存在 odom -> map。
+
+        返回 (T_odom_base, stamp_msg, cache_stamp)。调用方使用 cache_stamp
+        按完整 map TF 缓存相同的方式检查有效年龄。
+        """
+        with self._lock:
+            if self._latest_odom_base is None:
+                return None, None, self._latest_odom_base_cache_stamp
+            return (
+                self._latest_odom_base["T_odom_base"].copy(),
+                self._latest_odom_base["stamp_msg"],
+                self._latest_odom_base_cache_stamp,
             )
 
 def spin_tf_cache(node: TfCacheNode, stop_event: threading.Event):
@@ -360,14 +404,14 @@ def normalize_yaw_deg(yaw_deg):
 
 
 def _mirror_yaw_deg_for_blue_field(yaw_deg):
-    return normalize_yaw_deg(180.0 - float(yaw_deg))
+    return normalize_yaw_deg(-float(yaw_deg))
 
 
-def _transform_x_for_field(x):
-    x = float(x)
+def _transform_y_for_field(y):
+    y = float(y)
     if position_backend.is_blue_field():
-        return -x
-    return x
+        return -y
+    return y
 
 
 def radians_to_degrees(angle_rad):
@@ -377,26 +421,41 @@ def radians_to_degrees(angle_rad):
     return yaw_deg
 
 
+def radians_to_control_degrees(angle_rad):
+    return normalize_yaw_deg(math.degrees(angle_rad) + ODIN_YAW_OFFSET_DEG)
+
+
+def logic_yaw_to_control_yaw_deg(logic_yaw_deg):
+    logic_yaw_deg = normalize_yaw_deg(float(logic_yaw_deg))
+    if position_backend.is_blue_field():
+        return _mirror_yaw_deg_for_blue_field(logic_yaw_deg)
+    return logic_yaw_deg
+
+
 def transform_odometry_for_field(odometry):
     """
     按当前红/蓝半场调整 odom 输出。
 
-    红场保持原值；蓝场将雷达输出镜像到 y 轴对称坐标系:
-      x -> -x
-      yaw -> 180 - yaw
-      linear_x -> -linear_x
+    红场保持原值；蓝场将雷达输出转换到当前逻辑坐标系:
+      x -> x
+      y -> -y
+      yaw -> -yaw
+      linear_x -> linear_x
+      linear_y -> -linear_y
       angular_z -> -angular_z
     """
     if odometry is None or not position_backend.is_blue_field():
         return odometry
 
     transformed = dict(odometry)
-    transformed["position_x"] = -float(transformed["position_x"])
+    transformed["position_x"] = float(transformed["position_x"])
+    transformed["position_y"] = -float(transformed["position_y"])
     transformed["yaw_deg"] = _mirror_yaw_deg_for_blue_field(transformed["yaw_deg"])
     transformed["yaw_rad"] = math.radians(transformed["yaw_deg"])
-    transformed["linear_x"] = -float(transformed["linear_x"])
+    transformed["linear_x"] = float(transformed["linear_x"])
+    transformed["linear_y"] = -float(transformed["linear_y"])
     transformed["angular_z"] = -float(transformed["angular_z"])
-    transformed["field_transform"] = "blue_mirror_x"
+    transformed["field_transform"] = "blue_mirror_y"
     return transformed
 
 #将ROS2的TransformStamped消息转换为4x4齐次变换矩阵
@@ -422,14 +481,20 @@ def _stamp_to_sec(stamp_msg):
 def _stamp_to_ros_time(stamp_msg):
     return rclpy.time.Time.from_msg(stamp_msg)
 
-def _lidar_pose_from_matrices(T_map_odom: np.ndarray, T_odom_base: np.ndarray, stamp_sec=None, age_sec=None):
+def _lidar_pose_from_matrices(
+    T_map_odom: np.ndarray,
+    T_odom_base: np.ndarray,
+    stamp_sec=None,
+    age_sec=None,
+    pose_source=None,
+):
     T_map_lidar = T_map_odom @ T_odom_base
-    x = _transform_x_for_field(T_map_lidar[0, 3])
-    y = float(T_map_lidar[1, 3])
+    x = float(T_map_lidar[0, 3])
+    y = _transform_y_for_field(T_map_lidar[1, 3])
     z = float(T_map_lidar[2, 3])
     yaw = math.atan2(T_map_lidar[1, 0], T_map_lidar[0, 0])
 
-    return {
+    pose = {
         "x": x,
         "y": y,
         "z": z,
@@ -438,21 +503,20 @@ def _lidar_pose_from_matrices(T_map_odom: np.ndarray, T_odom_base: np.ndarray, s
         "stamp_sec": stamp_sec,
         "age_sec": age_sec,
     }
+    if pose_source is not None:
+        pose["pose_source"] = str(pose_source)
+    return pose
 
 def get_lidar_pose_in_map_latest(tf_cache_node: TfCacheNode, max_cache_age_sec=1.0):
     """
-    使用 /tf 中按同时间戳配对后的最新有效 TF 对，计算雷达在 map 下的位姿。
+    获取雷达在当前 map 逻辑坐标系下的最新有效位姿。
+
+    默认使用完整 map TF；里程计模式下将 odom 原点作为 map 原点。
     """
-    T_map_odom, T_odom_base, stamp_msg, cache_stamp = tf_cache_node.get_latest()
-    if T_map_odom is None or T_odom_base is None or stamp_msg is None:
-        return None
-
-    age_sec = time.time() - cache_stamp
-    if age_sec < 0.0 or age_sec > float(max_cache_age_sec):
-        return None
-
-    stamp_sec = _stamp_to_sec(stamp_msg)
-    return _lidar_pose_from_matrices(T_map_odom, T_odom_base, stamp_sec, age_sec)
+    return get_lidar_pose_in_map_synced(
+        tf_cache_node=tf_cache_node,
+        max_age_sec=max_cache_age_sec,
+    )
 
 # 获取一对同一时间戳的TF: odom->base 和 map->odom
 def tf_pair_synced(tf_cache_node: TfCacheNode):
@@ -480,8 +544,17 @@ def get_lidar_pose_in_map_synced(
     T_map_odom, T_odom_base, stamp_msg, cache_stamp = tf_pair_synced(
         tf_cache_node=tf_cache_node,
     )
-    if T_map_odom is None:
-        return None
+    if tools.is_odometry_mode():
+        T_odom_base, stamp_msg, cache_stamp = tf_cache_node.get_latest_odom_to_base()
+        if T_odom_base is None or stamp_msg is None:
+            return None
+        T_map_odom = np.eye(4, dtype=float)
+        pose_source = "odom_as_map"
+    else:
+        # 未选择里程计模式时，保持原有完整 map TF 逻辑。
+        if T_map_odom is None or T_odom_base is None or stamp_msg is None:
+            return None
+        pose_source = "relocalization_tf"
 
     # 优先使用本地缓存接收年龄，避免设备侧TF时间戳与本机ROS时钟不在同一时间基准时被误判。
     age_sec = time.time() - cache_stamp if cache_stamp is not None else None
@@ -500,7 +573,13 @@ def get_lidar_pose_in_map_synced(
     if age_sec < 0.0 or age_sec > float(max_age_sec):
         return None
 
-    return _lidar_pose_from_matrices(T_map_odom, T_odom_base, stamp_sec, age_sec)
+    return _lidar_pose_from_matrices(
+        T_map_odom,
+        T_odom_base,
+        stamp_sec,
+        age_sec,
+        pose_source=pose_source,
+    )
 
 
 def get_weapon_pose_in_map_synced(
@@ -525,6 +604,7 @@ def get_weapon_pose_in_map_synced(
     weapon_pose = cal_weapon_position(lidar_pose["T_map_lidar"])
     weapon_pose["stamp_sec"] = lidar_pose.get("stamp_sec")
     weapon_pose["age_sec"] = lidar_pose.get("age_sec")
+    weapon_pose["pose_source"] = lidar_pose.get("pose_source")
     return weapon_pose
 #-----------------------------------------------------------------------------------------------------
 # 由雷达在map下位姿，计算机器人中心在map下位姿
@@ -547,8 +627,8 @@ def cal_robot_position(T_map_lidar: np.ndarray):
     """
     T_map_robot = T_map_lidar @ get_t_lidar_to_base()
 
-    x = _transform_x_for_field(T_map_robot[0, 3])
-    y = float(T_map_robot[1, 3])
+    x = float(T_map_robot[0, 3])
+    y = _transform_y_for_field(T_map_robot[1, 3])
     z = float(T_map_robot[2, 3])
     yaw = math.atan2(T_map_robot[1, 0], T_map_robot[0, 0])
 
@@ -603,8 +683,8 @@ def cal_weapon_position(T_map_lidar: np.ndarray):
     """
     T_map_weapon = T_map_lidar @ get_t_lidar_to_weapon()
 
-    x = _transform_x_for_field(T_map_weapon[0, 3])
-    y = float(T_map_weapon[1, 3])
+    x = float(T_map_weapon[0, 3])
+    y = _transform_y_for_field(T_map_weapon[1, 3])
     z = float(T_map_weapon[2, 3])
     yaw = math.atan2(T_map_weapon[1, 0], T_map_weapon[0, 0])
 

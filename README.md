@@ -19,24 +19,25 @@
 ## 当前状态
 
 - 当前主线使用 `lib2/` 和 `utils/`；旧 `lib/` 基本只作参考。
+- 当前任务主线是修正蓝半场因镜像坐标系导致的逻辑错误：蓝半场在上位机侧按镜像后的逻辑坐标系运行，动作流程不再单独按红/蓝改方向，下位机发帧角度再转换回雷达/控制器原始坐标系。
 - 通信协议为 V3 控制帧，`tools.frame_thread` 内部维护 `ch0~ch9/yaw_i16/des_yaw_i16/cylinder_select`，动作层只局部更新自己负责的通道。
-- 后端选择拆成两层：`LIDAR_TYPE` 选择位姿来源，`FIELD_TYPE` 选择红/蓝半场坐标和地图方向。
+- 后端选择拆成两层：`LIDAR_TYPE` 选择位姿来源，`FIELD_TYPE` 选择红/蓝半场坐标、逻辑 yaw 和梅林编号映射。
 - 雷达后端：`1=odin`，`2=mid360`。主流程必须通过 `module.init(lidar_type=...)` 或 `module.configure_position_backend(...)` 刷新 `position_resource` 和 `move` 的缓存。
 - `module.init()` 建立 TCP 后会保持 `des_yaw_i16=0` 关闭航向 PID，不自动原地旋转；同时设置 `ch9=800`，依次执行 `weapon.weapon_up()` 和 `weapon.weapon_loose()`。完成后将 `ch1=0`、`ch5/ch6/ch7=1`，保持夹爪打开状态 `ch4=3` 和吸盘头角度 `ch9=800`。纯通信/位姿调试可传 `initialize_machine_pose=False` 跳过机械动作。
 - 场地半场：`1=red/right`，`2=blue/left`。蓝场入口、weapon、赛后三点里还有占位/镜像值，换场地前要重新核对实测坐标。
-- `lib2/` 执行层和 `utils/challenge_lib.py` 生成端已按当前红/蓝半场方向语义处理方向码；`position_resource` 和 `utils/race.py` 均维护红/蓝半场台阶高度。
+- `lib2/` 执行层和 `utils/challenge_lib.py` 生成端当前统一使用同一套方向码语义；红/蓝半场差异主要由 `position_odin.py` 坐标/逻辑 yaw 镜像、`position_resource` 台阶矩阵和 `utils/race.py` 梅林编号映射承担。
 - `utils/race.py` 的比赛数量模式已集中化：`configure_competition_mode(1)` 使用 `2R1/2R2/1Fake`，模式 `2` 使用 `3R1/3R2/1Fake`；`REQUIRED_R2_PICKUP_COUNT` 独立表示 R2 必须抓取的数量，默认为 `2`。
 - QR/KFS 规划前会按当前比赛模式严格校验 R1/R2/Fake 数量；只校验类型和数量，尚不校验摆放区域。
-- 完整挑战赛矩阵当前仍会自动包含固定入口/出口行：入口为 `-1->2`，最后到 `10` 追加 `10->13`，最后到 `12` 追加 `12->15`；`move_dir` 由 `tools.stair_id_to_direction()` 按当前红/蓝半场动态生成。
+- 完整挑战赛矩阵当前仍会自动包含固定入口/出口行：入口为 `-1->2`，最后到 `10` 追加 `10->13`，最后到 `12` 追加 `12->15`；`move_dir` 由 `tools.stair_id_to_direction()` 按当前半场台阶矩阵坐标推导，但方向码语义保持统一。
 - 如 QR 前三位含 R2-KFS，`challenge_lib.build_action_matrix_with_pre_entry_pickup()` 会先生成场外吸取行，再插入入口上楼行。2号优先；1/3号同时存在时分别规划并选总代价较小者。
 - `module.move_to_des()` / `module.move_backward_to_des()` 默认 `v=500`；主流程显式传入 `v=600` 或 `v=300` 的调用不受默认值影响。
-- 旋转到目标角当前只看角度稳定：旋转期间 `ch0/ch2/ch3=0`，不做位置保持。默认角度容忍值为 `3deg`，稳定时间为 `1s`。
+- 旋转到目标角当前只看角度稳定：旋转期间 `ch0/ch2/ch3=0`，不做位置保持。默认角度容忍值为 `2deg`，稳定时间为 `1s`。
 - KFS 姿态和后续线程已拆到 `lib2/kfs.py`；`module.fetch_and_store_kfs()` 保留旧名，当前实际负责前探、双头吸盘切换、抓取、吸取和异步回初态，不再执行 pose4。
 - `module.side_suck()` 已接入 `[-1,1,1,0,1]` / `[-1,3,1,0,1]` 特殊动作行，完成侧吸微调、气缸/角度选择、pose5、吸取、横移、异步收尾和回到 `-1`。侧吸准备点移动默认速度已改为 `move_speed=350`。
 - `kfs.kfs_suck_preparation(sender,count)` 已加入，按 `count=0/1/2` 预先选择气缸并打开吸气；`count=1` 选择 PF2 并 `suck_count += 1`，`count=2` 选择双气缸并 `suck_count += 2`，`count=0` 不执行动作。
 - 四轮锁角已封装为 `move.lock_wheel()` / `move.unlock_wheel()`。现有协议未说明锁存行为，切换到 KFS/weapon 模式后不保证继续锁轮。
-- `module.fetch_weapon()` 按红/蓝半场自动选择接近方向、抓取方向和释放前旋转方向；函数返回时保持夹取/抬起状态，不负责释放。可用 `move_to_approach_point=0` 跳过先到 weapon 前方约 `1m` 的接近点。
-- `tools.py` 已加入雷达左上角打点的角度坐标修正：`deg0_correction()`、`deg90_correction()`、`neg90_correction()`、`deg180_correction()` 和分派入口 `deg_correction(target_deg,x,y)`；红/蓝半场各维护一张修正表，当前蓝场表暂与红场一致。
+- `module.fetch_weapon()` 动作逻辑不再按红/蓝半场分支；只从当前 `position_lib` 读取对应半场的 weapon 坐标，接近点、抓取 yaw、返回 yaw 和释放前 yaw 使用同一套逻辑。函数返回时保持夹取/抬起状态，不负责释放。可用 `move_to_approach_point=0` 跳过先到 weapon 前方约 `1m` 的接近点。
+- `tools.py` 保留雷达左上角打点的角度坐标修正入口：`deg0_correction()`、`deg90_correction()`、`neg90_correction()`、`deg180_correction()` 和分派入口 `deg_correction(target_deg,x,y)`；当前实现只校验角度并原样返回坐标，不再实际叠加偏移。
 - `lib2/compete_logic.py` 当前封装区域流程：`rigion_1()` 抓 weapon 并等待 QR 规划锁释放，`rigion_2()` 消费动作矩阵队列并执行完整矩阵，`rigion_2_retry_plan(r1_count,r2_count,required_r2_pickup_count,qr_string,...)` 用参数重规划并推入队列，`rigion_3()` 进入九宫格后执行 `high_score190` 或 `totally_win`。
 
 ## 文件结构
@@ -56,6 +57,7 @@
 - `utils/process.py`：二维码图像源、检测和 payload 校验。`image_source=1` 使用 RealSense D435i/D455 彩色流；打开时会打印设备名、序列号、固件和 USB 模式，默认优先 `1280x720@30`，再 fallback 到 `848x480@30`、`640x480@30`，预热阶段每帧 `5000ms` 超时并最多重试 `3` 次。RealSense 彩色传感器默认关闭自动曝光并尝试设置 `exposure=120.0`、`gain=32.0`，不支持时只打印警告不中断。正式后台扫码线程使用和 `d455.py` 相同的实时策略：优先扫上一帧二维码 ROI，再扫全图原图/灰度，重型 CLAHE/Otsu/自适应阈值默认每 `30` 帧兜底一次，`full_detect=True` 时才在兜底帧加入 `2x/3x` 放大候选。D455 若枚举为 `USB=2.1`，高分辨率/首帧可能超时；应优先换到真正 USB3 链路。`image_source=2` 以 `RELIABLE` QoS 订阅 `/odin1/image/undistorted`，并将常见 ROS `Image` 编码转换为 BGR。Odin 首帧超过 `5s` 未到达时会报错并释放扫码锁，避免主流程永久等待；驱动配置必须启用 `sendrgbundistort: 1`。
 - `utils/route.py` / `utils/meilin.py`：旧梅林/对抗赛相关逻辑，非当前挑战赛主执行链路。
 - `d455.py`：RealSense D455/D435i 二维码检测脚本，复用 `utils.process` 的相机打开、曝光设置、取帧、QR 识别和 ROI 逻辑；自身只保留子进程、窗口预览和结果队列封装。默认 `1280x720@30`、预热 `15` 帧、稳定 `2` 帧后输出结果；检测策略为实时扫码式：优先扫上一帧二维码 ROI，再扫全图原图/灰度，重型 CLAHE/Otsu/自适应阈值默认每 `30` 帧兜底一次，`--full-detect` 只允许在兜底帧加入 `2x/3x` 放大候选。默认关闭自动曝光并设置 `exposure=120.0`、`gain=32.0`，可用 `--auto-exposure`、`--color-exposure`、`--color-gain` 现场调参，用 `--no-window` 在 SSH 下关闭窗口。
+- `measure.py` / `measure_weapon.py`：Odin TF 打点脚本。支持 `--field red|blue` 或 `--field 1|2`，分别输出机器人中心和 weapon/夹爪参考点在当前半场下的真实坐标；打印行会带 `field=red/blue`。
 
 ## 主流程脚本
 
@@ -262,7 +264,39 @@ position_backend.set_field_type(position_backend.FIELD_TYPE_BLUE)
 - `utils/race.py` 的 `pos_to_coord`
 - `position_resource.build_stair_height_relation_matrix()`
 - `position_odin.py` 的入口、入口前点、weapon 目标点
-- `module.fetch_weapon()` 的接近方向、最终 yaw 和释放前 yaw
+- `position_odin.py` 的 `x` 坐标、逻辑 yaw、x 向线速度和角速度输出
+
+Odin 蓝场当前把坐标系整体镜像，动作层不再额外镜像；下位机发帧角度单独转回雷达/控制器原始坐标系：
+
+- 实时 yaw：`position_odin.radians_to_degrees()` 输出，蓝场按 `180-yaw` 镜像；蓝场逻辑为左手系，顺时针为正、逆时针为负。
+- 当前角发送：`position_resource` 写入 `sender.current_yaw_i16` 时使用 `radians_to_control_degrees()`，不把左手系逻辑角直接交给下位机。
+- 目标角发送：业务层传入逻辑角；`move.encode_target_yaw_i16()` 发帧前通过 `logic_yaw_to_control_yaw_deg()` 转成下位机原始右手系目标角。
+
+蓝场目标角转换公式：
+
+```text
+control_yaw = normalize(180deg - logic_yaw)
+```
+
+示例：
+
+```text
+logic 0deg   -> control 180deg
+logic 30deg  -> control 150deg
+logic 90deg  -> control 90deg
+logic 180deg -> control 0deg（编码时改为 1，避免 0 表示关闭 PID）
+```
+
+现场打点脚本：
+
+```bash
+python3 measure.py --field red
+python3 measure.py --field blue
+python3 measure_weapon.py --field red
+python3 measure_weapon.py --field blue
+```
+
+`measure.py` 输出机器人中心坐标，`measure_weapon.py` 输出 weapon/夹爪参考点坐标。蓝场下脚本会先设置 `FIELD_TYPE_BLUE`，因此打印的 `x/y/yaw` 是当前蓝场逻辑下应录入和使用的真实坐标。
 
 业务层读取坐标优先使用：
 
@@ -298,44 +332,36 @@ y=1: 2:20  5:40  8:60  11:40
 y=0: 3:40  6:20  9:40  12:20
 ```
 
-蓝场逻辑地图当前是 y 方向镜像：
+蓝场逻辑地图当前按物理镜像做编号对换：`1/3`、`4/6`、`7/9`、`10/12`、`13/15` 对换；高度跟随物理台阶编号：
 
 ```text
-y=0: 1:40  4:60  7:40  10:20
+y=0: 1:40  4:20  7:40  10:20
 y=1: 2:20  5:40  8:60  11:40
-y=2: 3:40  6:20  9:40  12:20
+y=2: 3:40  6:60  9:40  12:20
 ```
 
-`lib2/` 执行层方向编码按红/蓝半场语义解释：
+`lib2/` 执行层方向编码当前不再区分红/蓝半场，统一使用红场方向语义。蓝场通过坐标、逻辑 yaw 和梅林编号映射处理半场差异：
 
 ```text
 0 = 原地
 
-红场：
 1 = 90deg   / map y+
 2 = 180deg  / map x-
 3 = 0.01deg / map x+
 4 = -90deg  / map y-
-
-蓝场：
-1 = 90deg   / map y-
-2 = 0.01deg / map x+
-3 = 180deg  / map x-
-4 = -90deg  / map y+
 ```
 
 `tools.direction_int_to_yaw_deg()` 映射：
 
 ```python
-红场: {1: 90.0, 2: 180.0, 3: 0.01, 4: -90.0}
-蓝场: {1: 90.0, 2: 0.01, 3: 180.0, 4: -90.0}
+{1: 90.0, 2: 180.0, 3: 0.01, 4: -90.0}
 ```
 
-`tools.stair_id_to_direction()` 和 `position_resource.get_stair_height_relation()` 均按上述红/蓝语义工作。`race.pos_to_coord` 仍保持逻辑前/左网格，不直接表示真实地图 x/y；路径规划生成端的方向码同步另行处理。
+`utils/race.py::get_direction_code()`、`tools.stair_id_to_direction()`、`tools.direction_int_to_yaw_deg()` 和 `position_resource.get_stair_height_relation()` 必须保持同一套方向语义。蓝场梅林编号在 `utils/race.py` 和 `position_resource.py` 中做编号对换；方向码本身不再额外按半场镜像。
 
 ## 坐标修正
 
-当前现场打点约定：梅林台阶坐标以雷达左上角作为参考点；0/90/180/-90deg 的角度修正来自“左上角对准同一物理点后旋转到对应角度时，定位读数多出来的偏移”。因此 `tools.py` 中保存的是抵消量，即测量偏移的反号：
+当前现场打点约定曾按“梅林台阶坐标以雷达左上角作为参考点”记录 0/90/180/-90deg 的角度修正量。`tools.py` 仍保留红/蓝两张修正表：
 
 ```python
 RED_LIDAR_CORRECTION_BY_YAW = {
@@ -346,13 +372,13 @@ RED_LIDAR_CORRECTION_BY_YAW = {
 }
 ```
 
-蓝场 `BLUE_LIDAR_CORRECTION_BY_YAW` 当前暂用同一组值，后续需要按蓝场实测值替换。业务入口使用：
+蓝场 `BLUE_LIDAR_CORRECTION_BY_YAW` 当前暂用同一组值。业务入口仍使用：
 
 ```python
 tools.deg_correction(target_deg, x, y)
 ```
 
-修正角度必须是“移动到该坐标时车体/雷达实际保持的朝向”，不是到点后额外旋转到的展示角度。该修正只适用于坐标按 `0.01deg/0deg` 基准打点、但动作以其它朝向到点的场景；如果某个坐标本来就是按目标朝向实测的，不应再套对应角度修正。
+当前 `_apply_lidar_correction()` 只校验 `target_deg` 是否属于 `0.01/90/180/-90`，然后原样返回 `(x,y)`，不再实际叠加偏移。后续若重新启用修正，修正角度必须是“移动到该坐标时车体/雷达实际保持的朝向”，不是到点后额外旋转到的展示角度。该修正只适用于坐标按 `0.01deg/0deg` 基准打点、但动作以其它朝向到点的场景；如果某个坐标本来就是按目标朝向实测的，不应再套对应角度修正。
 
 `module.execute_action_row()` 当前只在梅林动作行内集中修正坐标：
 
@@ -389,7 +415,7 @@ race.REQUIRED_R2_PICKUP_COUNT = 2   # 必须拿取数，与场上R2总数独立
 - `height_action`：`0=不用上下楼`，`1=需要上下楼`；上/下由执行层根据真实台阶矩阵判断。
 - `grab_action`：`0=不抓取`，`1=R2 方块/KFS 抓取`。R1-KFS 按规则由 R1 移除，R2 经过 R1 格时必须输出 `0`。
 
-`utils/challenge_lib.py::build_action_matrix_with_pre_entry_pickup()` 生成的挑战赛完整矩阵会包含入口和出口动作。以下方向码示例按红场写出；蓝场会按当前半场动态生成方向码。无场外吸取时，第一行是：
+`utils/challenge_lib.py::build_action_matrix_with_pre_entry_pickup()` 生成的挑战赛完整矩阵会包含入口和出口动作。以下方向码示例按统一方向语义写出；蓝场会使用当前半场编号/矩阵推导，但方向码含义不再额外镜像。无场外吸取时，第一行是：
 
 ```python
 [-1, 2, 1, 1, 0]
@@ -554,7 +580,7 @@ suck_count = 2：吸盘头 180deg（ch9=-300），选择 PF3
 1. 校验目标台阶只能为 `1/3`。
 2. 按原 `target_stair_id + suck_count` 分支先旋转吸盘头：目标1时 `count1->90deg`、`count2->-90deg`；目标3时 `count1->-90deg`、`count2->90deg`。
 3. 调用 `kfs.kfs_side_pose()` 切换 pose5，再按当前 `suck_count` 选择气缸：`1->PF2`、`2->PF3`。
-4. 调用 `move.side_suck_movement(...)`：先以 `move_speed=350` 移动到 `-1` 台阶左右偏移 `0.5m` 的侧吸准备点，再以 `ch2=300` 前进 `1s` 做高位微调。红场目标 yaw 为 `90deg`，蓝场目标 yaw 为 `-90deg`，均通过四方向函数得到。该移动速度作为 `move_to_target()` 的平移向量幅值上限，按方向分配到 `ch0/ch2`，不是两个通道各给 `350`。
+4. 调用 `move.side_suck_movement(...)`：先读取当前半场 `-1` 台阶坐标，目标 `1` 移动到 `(x-0.6,y)`，目标 `3` 移动到 `(x+0.6,y)`，目标 yaw 统一为方向码 `1 -> 90deg`；到侧吸准备点后以 `ch2=300` 前进 `1s` 做高位微调。该移动速度作为 `move_to_target()` 的平移向量幅值上限，按方向分配到 `ch0/ch2`，不是两个通道各给 `350`。
 5. 调用 `set_kfs_suction(suction_on=True,pose_id=5)` 对已选气缸吸取，保持 `ch4=3`。
 6. 调用 `move.side_suck_lateral_movement(...)` 做定时左右平移：目标1向左、目标3向右；默认 `ch0` 绝对值 `100`，持续 `4s`，对应 `move.DEFAULT_SIDE_SUCK_LATERAL_CMD_ABS` 和 `move.DEFAULT_SIDE_SUCK_LATERAL_DURATION_SEC`。
 7. 横移完成后等待 `0.5s`，启动 `kfs.start_kfs_post_suction_thread()`，并同步将底盘移动回 `-1` 号台阶中心，回程航向沿用侧吸准备点 yaw。
@@ -568,19 +594,12 @@ suck_count = 2：吸盘头 180deg（ch9=-300），选择 PF3
 
 ## Weapon 流程
 
-`module.fetch_weapon(...)` 从当前 `position_lib` 读取 `WEAPON_TARGETS`。红场默认（当前地图坐标系）：
+`module.fetch_weapon(...)` 从当前 `position_lib` 读取当前半场的 `WEAPON_TARGETS`。动作逻辑不再按红/蓝半场分支，默认统一为：
 
 - 接近点：`(weapon_x + 1.0, weapon_y)`
 - 抓取 yaw：`0.01deg`
 - 返回接近点 yaw：`0.01deg`
 - 释放前旋转 yaw：`180deg`
-
-蓝场默认（当前地图坐标系）：
-
-- 接近点：`(weapon_x - 1.0, weapon_y)`
-- 抓取 yaw：`180deg`
-- 返回接近点 yaw：`180deg`
-- 释放前旋转 yaw：`0.01deg`
 
 当前流程：
 
@@ -638,6 +657,7 @@ move.reset_weapon_after_fetch(sender)
 ## 未完成与风险
 
 - 蓝场的入口、weapon、赛后三点坐标有占位/镜像性质，必须按实测场地复核。
+- 蓝半场镜像修正的当前原则是“数据层/坐标系镜像，动作层不重复镜像”。后续若在动作流程中新增 `if blue: 换方向/换 yaw/反向偏移`，需要先确认不是二次镜像。
 - `position_mid360.py` 的半场拆分不如 odin 完整；当前主入口仍以 odin 为主。
 - KFS、weapon、上下楼仍有大量按时间等待；没有控制器状态 ACK，硬件完成只能依赖时间或位姿条件。
 - V3 帧格式和新版上下楼触发语义已接入；旧 `place_kfs()` 和 `move.control_kfs_pose()` 已删除，放置动作当前使用 `kfs.place_kfs_pose()`、`kfs.sucker_release_pose()`、`kfs.release_kfs()` 和 `kfs.place_3rd_kfs()` 等新接口组合。
