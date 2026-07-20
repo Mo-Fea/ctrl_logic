@@ -452,6 +452,11 @@ class ChallengeQRScanner:
 
         self.stop_event = threading.Event()
         self.done_event = threading.Event()
+        # 线程创建和图像识别可用不是同一件事。启动方只有在成功打开
+        # 图像源、拿到首帧彩色图并完成首轮识别后，才能认为扫码器可用。
+        self.startup_ready_event = threading.Event()
+        self.startup_failed_event = threading.Event()
+        self.startup_complete_event = threading.Event()
         self.thread = None
         self.last_result = None
         self.last_error = None
@@ -464,6 +469,10 @@ class ChallengeQRScanner:
             return self.thread
         self.stop_event.clear()
         self.done_event.clear()
+        self.startup_ready_event.clear()
+        self.startup_failed_event.clear()
+        self.startup_complete_event.clear()
+        self.last_error = None
         self.thread = threading.Thread(
             target=self._run,
             daemon=True,
@@ -488,6 +497,11 @@ class ChallengeQRScanner:
             running_lock=self.running_lock,
             timeout=timeout,
         )
+
+    def wait_until_ready(self, timeout=None):
+        """等待扫码器完成启动校验，返回是否已可进行二维码识别。"""
+        completed = self.startup_complete_event.wait(timeout=timeout)
+        return bool(completed and self.startup_ready_event.is_set())
 
     def _put_result(self, result):
         self.last_result = result
@@ -518,6 +532,15 @@ class ChallengeQRScanner:
                 if frame is None:
                     time.sleep(self.loop_interval_sec)
                     continue
+                if (
+                    not isinstance(frame, np.ndarray)
+                    or frame.ndim != 3
+                    or frame.shape[2] < 3
+                    or frame.size == 0
+                ):
+                    raise RuntimeError(
+                        "二维码图像源未返回有效 BGR 彩色图像"
+                    )
 
                 frame_count += 1
                 if (
@@ -537,6 +560,11 @@ class ChallengeQRScanner:
                     use_heavy_fallback=use_heavy_fallback,
                     include_upscaled=self.full_detect,
                 )
+                if not self.startup_ready_event.is_set():
+                    # 至此已确认：图像源可打开、首帧彩色图可获取，且检测器已
+                    # 成功执行过一轮识别。二维码本身可以稍后再出现在画面中。
+                    self.startup_ready_event.set()
+                    self.startup_complete_event.set()
                 if points is not None:
                     next_roi = qr_points_to_roi(points, frame.shape)
                     if next_roi is not None:
@@ -594,6 +622,9 @@ class ChallengeQRScanner:
                 time.sleep(self.loop_interval_sec)
         except Exception as exc:
             self.last_error = exc
+            if not self.startup_ready_event.is_set():
+                self.startup_failed_event.set()
+                self.startup_complete_event.set()
         finally:
             if pipeline is not None:
                 try:
@@ -607,6 +638,13 @@ class ChallengeQRScanner:
                     pass
             if lock_acquired:
                 self.running_lock.release()
+            if not self.startup_ready_event.is_set():
+                if self.last_error is None:
+                    self.last_error = RuntimeError(
+                        "二维码识别线程在完成首帧识别前停止"
+                    )
+                self.startup_failed_event.set()
+                self.startup_complete_event.set()
             self.done_event.set()
 
 

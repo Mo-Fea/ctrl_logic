@@ -15,6 +15,20 @@ from lib2 import tools
 side_9 = 0.54
 weapon_side = 0.2
 
+# 里程计模式固定启动点。坐标以雷达的逻辑地图坐标表示。
+ODOMETRY_ORIGIN_START_POINT = (0.0, 0.0)
+ODOMETRY_SECOND_START_POINT = (3.757, 7.2)
+ODOMETRY_DEFAULT_START_POINT = ODOMETRY_ORIGIN_START_POINT
+
+# 0 号选项由交互配置保留给手动输入坐标。
+ODOMETRY_START_POINTS = {
+    1: ("origin", ODOMETRY_ORIGIN_START_POINT),
+    2: ("second_start_point", ODOMETRY_SECOND_START_POINT),
+}
+_odometry_start_lidar_logic_xy = ODOMETRY_DEFAULT_START_POINT
+_odometry_start_reference_odom_base = None
+_odometry_start_lock = threading.Lock()
+
 
 
 entrance_x0_red = 1.9331
@@ -30,15 +44,15 @@ entrance_x180_red = 1.8493
 entrance_y180_red = 3.0828
 
 weapon_x_red = -1.0134
-weapon_y_red = -0.324
+weapon_y_red = -0.140
 
 # 九宫格区域坐标占位（二维坐标，待实测后替换）
 pre_entrance9_red = (4.124, 8.2674)
 entrance9_red = (4.124, 10.579)
 column2_x_red = -0.7680
 column2_y_red = 10.0
-pre_x_red = 1.6189   
-R1climb_red = (1.6189, 9.2321)
+pre_x_red = 2.8189   
+R1climb_red = (3.3189, 9.4231)
 
 #--------------------------------------------------------------------------------------------------------------
 # Left field placeholders. Fill these with measured coordinates from the real field.
@@ -55,14 +69,14 @@ entrance_x180_blue = 1.8493
 entrance_y180_blue = 3.0828
 
 weapon_x_blue = -1.0134
-weapon_y_blue = -0.324
+weapon_y_blue = -0.140
 
 pre_entrance9_blue = (4.124, 8.2674)
 entrance9_blue = (4.124, 10.579)
 column2_x_blue = -0.7680
 column2_y_blue = 10.0
-pre_x_blue = 1.6189                   
-R1climb_blue = (1.6189, 9.2321)
+pre_x_blue = 3.3189                   
+R1climb_blue = (3.3189, 9.4321)
 
 
 ENTRANCE_X0_RED = entrance_x0_red
@@ -181,6 +195,106 @@ def get_t_lidar_to_base():
     返回 雷达->机器人中心 的固定齐次变换矩阵(4x4)。
     """ 
     return T_LIDAR_TO_BASE.copy()
+
+
+def reset_odometry_start_pose():
+    """恢复里程计模式的雷达启动点为默认逻辑坐标。"""
+    global _odometry_start_lidar_logic_xy
+    global _odometry_start_reference_odom_base
+
+    with _odometry_start_lock:
+        _odometry_start_lidar_logic_xy = tuple(ODOMETRY_DEFAULT_START_POINT)
+        _odometry_start_reference_odom_base = None
+
+
+def set_odometry_start_lidar_pose(x, y):
+    """设置里程计模式下雷达的逻辑地图启动坐标。"""
+    global _odometry_start_lidar_logic_xy
+    global _odometry_start_reference_odom_base
+
+    x = float(x)
+    y = float(y)
+    if not math.isfinite(x) or not math.isfinite(y):
+        raise ValueError(f"odometry start coordinates must be finite, got {(x, y)}")
+
+    with _odometry_start_lock:
+        _odometry_start_lidar_logic_xy = (x, y)
+        # 新启动点必须以第一帧有效 odom->lidar 作为参考，不能复用旧缓存。
+        _odometry_start_reference_odom_base = None
+
+    return {
+        "x": x,
+        "y": y,
+        "reference": "lidar_logic_map",
+    }
+
+
+def configure_odometry_start_point_interactively():
+    """在里程计模式下选择预设或手动输入雷达启动点。"""
+    print("里程计模式启动点（雷达逻辑坐标）：")
+    print("0. 手动输入已知坐标")
+    for point_id, (point_name, (x, y)) in sorted(ODOMETRY_START_POINTS.items()):
+        print(f"{int(point_id)}. {point_name}: ({float(x):.4f}, {float(y):.4f})")
+
+    while True:
+        raw_choice = input("请输入启动点编号：").strip()
+        try:
+            choice = int(raw_choice)
+        except ValueError:
+            print("错误输入，请输入有效启动点编号")
+            continue
+
+        if choice == 0:
+            try:
+                x = float(input("请输入启动点雷达x坐标（m）：").strip())
+                y = float(input("请输入启动点雷达y坐标（m）：").strip())
+            except ValueError:
+                print("错误输入，x/y必须是数值")
+                continue
+            try:
+                result = set_odometry_start_lidar_pose(x, y)
+            except ValueError as exc:
+                print(f"错误输入，{exc}")
+                continue
+            print(f"里程计启动点已设置为：({result['x']:.4f}, {result['y']:.4f})")
+            return result
+
+        point = ODOMETRY_START_POINTS.get(choice)
+        if point is None:
+            print("错误输入，请输入有效启动点编号")
+            continue
+
+        point_name, (x, y) = point
+        result = set_odometry_start_lidar_pose(x, y)
+        result["name"] = str(point_name)
+        print(
+            f"里程计启动点已设置为 {point_name}："
+            f"({result['x']:.4f}, {result['y']:.4f})"
+        )
+        return result
+
+
+def _build_odometry_start_map_transform(T_odom_base):
+    """构造使雷达起始输出等于手动逻辑坐标的 map<-odom 变换。"""
+    global _odometry_start_reference_odom_base
+
+    with _odometry_start_lock:
+        if _odometry_start_reference_odom_base is None:
+            _odometry_start_reference_odom_base = np.array(
+                T_odom_base,
+                dtype=float,
+                copy=True,
+            )
+
+        T_initial_lidar = _odometry_start_reference_odom_base.copy()
+        start_x, start_y = _odometry_start_lidar_logic_xy
+
+    # 蓝场输出会在 _transform_y_for_field() 中取反，因此这里先转回原始 map y。
+    raw_start_y = -start_y if position_backend.is_blue_field() else start_y
+    T_target_lidar = T_initial_lidar.copy()
+    T_target_lidar[0, 3] = float(start_x)
+    T_target_lidar[1, 3] = float(raw_start_y)
+    return T_target_lidar @ np.linalg.inv(T_initial_lidar)
 
 # 获取 雷达->武器 的固定齐次变换矩阵(4x4)
 def get_t_lidar_to_weapon():
@@ -548,8 +662,8 @@ def get_lidar_pose_in_map_synced(
         T_odom_base, stamp_msg, cache_stamp = tf_cache_node.get_latest_odom_to_base()
         if T_odom_base is None or stamp_msg is None:
             return None
-        T_map_odom = np.eye(4, dtype=float)
-        pose_source = "odom_as_map"
+        T_map_odom = _build_odometry_start_map_transform(T_odom_base)
+        pose_source = "odom_with_manual_start_point"
     else:
         # 未选择里程计模式时，保持原有完整 map TF 逻辑。
         if T_map_odom is None or T_odom_base is None or stamp_msg is None:

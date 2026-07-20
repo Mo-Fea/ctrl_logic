@@ -126,6 +126,9 @@ def main():
     if not rclpy.ok():
         tools.destroy_ros2_thread(flag_node, flag_thread, flag_stop_event)
         return
+    if tools.is_odometry_mode():
+        position_odin.reset_odometry_start_pose()
+        position_odin.configure_odometry_start_point_interactively()
     tf_node = position_odin.TfCacheNode(
         base_frame=args.base_frame,
         update_hz=args.tf_hz,

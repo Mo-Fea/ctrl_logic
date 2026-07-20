@@ -116,6 +116,7 @@ def init(
     wait_sender_ready=True,
     sender_ready_timeout_sec=2.0,
     initialize_machine_pose=True,
+    prompt_odometry_start_point=True,
 ):
     """
     一站式初始化:
@@ -136,6 +137,10 @@ def init(
       True: 连接后依次执行 weapon_up、weapon_loose、weapon_down，并保持 ch4=3、ch9=800。
       False: 跳过机械姿态初始化，供纯通信/位姿调试使用。
 
+    prompt_odometry_start_point:
+      True: 收到 /odin1/flag1=False 进入 Odin 里程计模式后，交互选择雷达启动点。
+      False: 不询问，使用 position_odin 的 ODOMETRY_DEFAULT_START_POINT。
+
     返回:
       sender: 已启动的 frame_thread
       get_flag: 可调用函数，返回当前重定位模式标志（True=正常重定位，False=里程计）
@@ -144,6 +149,13 @@ def init(
       flag_stop_event: 停止事件
     """
     configure_position_backend(lidar_type)
+    reset_odometry_start_pose = getattr(
+        position_resource.get_position_lib(),
+        "reset_odometry_start_pose",
+        None,
+    )
+    if reset_odometry_start_pose is not None:
+        reset_odometry_start_pose()
     tools.relocalization_flag = False
     tools.odometry_mode_flag = False
     tools.localization_mode_received = False
@@ -227,6 +239,14 @@ def init(
         print(f"Waiting for localization mode flag on {topic}...")
         while not tools.localization_mode_received:
             time.sleep(wait_poll_interval)
+        if tools.is_odometry_mode() and bool(prompt_odometry_start_point):
+            configure_odometry_start_point = getattr(
+                position_resource.get_position_lib(),
+                "configure_odometry_start_point_interactively",
+                None,
+            )
+            if configure_odometry_start_point is not None:
+                configure_odometry_start_point()
         if auto_destroy_relocalization_listener:
             tools.destroy_ros2_thread(
                 node=flag_node,
@@ -851,7 +871,7 @@ def side_suck(
     odom_runtime,
     target_stair_id,
     adjust_distance=0.2,
-    move_speed=350,
+    move_speed=400,
     lateral_distance=1.1,
     post_move_wait_sec=0.5,
 ):
@@ -927,7 +947,7 @@ def side_suck(
         target_stair_id=effective_target_stair_id,
         lateral_distance=0.6,
         cruise_forward_cmd=move_speed,
-        adjust_forward_cmd=300,
+        adjust_forward_cmd=400,
         adjust_duration_sec=1.0,
         reference="robot",
     )
@@ -3459,6 +3479,7 @@ def execute_action_matrix(
     final_direction=None,
     stop_on_unimplemented=True,
     stop_on_failed=True,
+    run_initial_meilin_prepare=True,
 ):
     """
     顺序执行动作矩阵。
@@ -3468,6 +3489,7 @@ def execute_action_matrix(
       None 时使用 -90deg 对应方向码 4。
     stop_on_unimplemented: 遇到 execute_action_row() 返回 implemented=False 时是否终止。
     stop_on_failed: 遇到已实现但 completed=False 的动作行时是否终止。
+    run_initial_meilin_prepare: 首行目标为 2 时是否自动执行梅林准备。
     """
     if final_direction is None:
         final_direction = 4
@@ -3493,7 +3515,7 @@ def execute_action_matrix(
             first_row_values[1],
             "first_to_pose",
         )
-        if first_to_pose == 2:
+        if first_to_pose == 2 and bool(run_initial_meilin_prepare):
             meilin_prepare_result = meilin_prepare(
                 sender=sender,
                 position_runtime=position_runtime,

@@ -39,8 +39,8 @@ DEFAULT_YAW_PREDICTION_MAX_DT_SEC = 0.10
 DEFAULT_DRIVE_LOOP_INTERVAL_SEC = 0.02
 # 碰撞移动：先要求速度曾超过该阈值，单位 m/s。
 DEFAULT_COLLISION_SPEED_FLOOR_MPS = 0.05
-# 碰撞移动：速度降到该阈值及以下认为接近 0，单位 m/s。
-DEFAULT_COLLISION_STOP_SPEED_MPS = 0.02
+# 碰撞移动：速度低于该阈值认为接近 0，单位 m/s。
+DEFAULT_COLLISION_STOP_SPEED_MPS = 0.05
 # 碰撞移动：接近 0 需要连续确认的帧数。
 DEFAULT_COLLISION_CONFIRM_FRAME_COUNT = 2
 # 移动到点主控制循环周期，单位 s。
@@ -108,7 +108,7 @@ DEFAULT_CLIMB_TRIGGER_HOLD_SEC = 0.3
 # 上楼梯触发前用于形成 1 -> 3 上升沿的预置时间，单位 s。
 DEFAULT_CLIMB_TRIGGER_ARM_SEC = 0.1
 # 上楼梯触发完成后的固定等待时间，单位 s。
-DEFAULT_CLIMB_POST_TRIGGER_DELAY_SEC = 3.0
+DEFAULT_CLIMB_POST_TRIGGER_DELAY_SEC = 4.0
 # 上楼梯流程最大允许时间，超过该时间后打印错误并终止程序，单位 s。
 DEFAULT_CLIMB_TIMEOUT_SEC = 15.0
 # 下楼梯触发通道保持时间，单位 s。
@@ -846,7 +846,7 @@ def _drive_till_collision(
 
             collision_detected = (
                 max_velocity > collision_speed_floor_mps
-                and latest_speed_mps <= collision_stop_speed_mps
+                and latest_speed_mps < collision_stop_speed_mps
             )
             if collision_detected:
                 confirm_count += 1
@@ -1349,7 +1349,7 @@ def enter_battlefield(
     position_runtime,
     odom_runtime,
     cruise_forward_cmd=DEFAULT_MOVE_FORWARD_CMD,
-    entrance_forward_cmd=400,
+    entrance_forward_cmd=500,
     target_yaw_deg=180.0,
     timeout_sec=None,
     reference="robot",
@@ -1360,7 +1360,7 @@ def enter_battlefield(
 
     流程：
       1. 以 -90deg 移动到 pre_entrance9_<red/blue>
-      2. 以 -90deg、ch2=400 移动到 entrance9_<red/blue>
+      2. 以 -90deg、ch2=500 移动到 entrance9_<red/blue>
 
     坐标按当前半场从 position 后端选择。
     """
@@ -1610,7 +1610,7 @@ def side_suck_movement(
     target_stair_id,
     lateral_distance=0.6,
     cruise_forward_cmd=DEFAULT_MOVE_FORWARD_CMD,
-    adjust_forward_cmd=300,
+    adjust_forward_cmd=400,
     adjust_duration_sec=1.0,
     timeout_sec=None,
     reference="robot",
@@ -1630,7 +1630,7 @@ def side_suck_movement(
       - target_stair_id=3:
           移动到 (x + 0.6, y)。
       - 目标角度为 90deg。
-      - 到侧吸预备点后，以 ch2=300 前进 1s。
+      - 到侧吸预备点后，以 ch2=400 前进 1s。
 
     90deg 不直接写死，按统一四方向映射 direction=1 转换。
     """

@@ -237,6 +237,61 @@ def rigion_3_execute_strategy(
     }
 
 
+def rigion_3_execute_strategy_challenge(
+    sender,
+    position_runtime,
+    odom_runtime,
+    final_strategy=1,
+    column=None,
+    extra_needed=None,
+):
+    """
+    挑战赛区域 3 最终策略：不执行 enter_battlefield，只执行挑战版胜利逻辑。
+
+    final_strategy=1: high_score190_challenge
+    final_strategy=2: totally_win_challenge(column, extra_needed)
+    """
+    final_strategy = int(final_strategy)
+    if final_strategy not in (1, 2):
+        raise ValueError(f"final_strategy must be 1 or 2, got {final_strategy}")
+    if final_strategy == 2 and (column is None or extra_needed is None):
+        raise ValueError(
+            "column and extra_needed are required when final_strategy is 2"
+        )
+
+    if final_strategy == 1:
+        strategy_name = "high_score190_challenge"
+        strategy_result = module.high_score190_challenge(
+            sender=sender,
+            position_runtime=position_runtime,
+            odom_runtime=odom_runtime,
+        )
+    else:
+        strategy_name = "totally_win_challenge"
+        strategy_result = module.totally_win_challenge(
+            sender=sender,
+            position_runtime=position_runtime,
+            odom_runtime=odom_runtime,
+            column=column,
+            extra_needed=extra_needed,
+        )
+
+    return {
+        "completed": bool(strategy_result.get("completed", False)),
+        "failed_step": (
+            None
+            if strategy_result.get("completed", False)
+            else strategy_result.get("failed_step", strategy_name)
+        ),
+        "final_strategy": int(final_strategy),
+        "column": column,
+        "extra_needed": extra_needed,
+        "strategy_name": strategy_name,
+        "enter_battlefield_skipped": True,
+        "strategy_result": strategy_result,
+    }
+
+
 def rigion_2(
     sender,
     position_runtime,
@@ -294,10 +349,8 @@ def rigion_1(
     sender,
     position_runtime,
     odom_runtime,
+    scanner,
     weapon_id=4,
-    image_source=1,
-    stable_frame_count=2,
-    show_window=False,
     scanner_start_timeout_sec=1.0,
     scanner_release_timeout_sec=None,
     fetch_weapon_kwargs=None,
@@ -306,11 +359,12 @@ def rigion_1(
     unlock_wheel_kwargs=None,
     weapon_down_kwargs=None,
     weapon_loose_kwargs=None,
-    final_wait_sec=5.0,
+    final_wait_sec=8.0,
     action_matrix_queue=None,
 ):
     """
-    区域 1 流程：后台识别 QR，同时抓取 weapon，等待 QR 线程释放锁后进入后续动作。
+    区域 1 流程：消费已启动且已完成首帧校验的 QR 识别线程，同时抓取
+    weapon。二维码识别完成后打开夹爪、放下夹爪，等待后再拉起夹爪。
 
     weapon_id 取 1~6，默认 4。fetch_weapon_y_correction 用于修正
     抓取 weapon 时接近点和返回点的 y 坐标，默认 0。
@@ -318,6 +372,8 @@ def rigion_1(
     weapon_id = int(weapon_id)
     if weapon_id < 1 or weapon_id > 6:
         raise ValueError(f"weapon_id must be 1..6, got {weapon_id}")
+    if scanner is None:
+        raise ValueError("scanner must be started before rigion_1")
 
     fetch_weapon_kwargs = (
         {} if fetch_weapon_kwargs is None else dict(fetch_weapon_kwargs)
@@ -339,18 +395,30 @@ def rigion_1(
     action_matrix_queue = (
         ACTION_MATRIX_QUEUE if action_matrix_queue is None else action_matrix_queue
     )
-    clear_action_matrix_queue(action_matrix_queue)
-    scanner = challenge_lib.start_background_qr_scanner(
-        result_queue=action_matrix_queue,
-        stable_frame_count=stable_frame_count,
-        show_window=show_window,
-        stop_after_success=True,
-        put_action_matrix_only=True,
-        image_source=image_source,
+    if scanner.result_queue is not action_matrix_queue:
+        raise ValueError("scanner result_queue must be action_matrix_queue")
+    startup_ready_event = getattr(scanner, "startup_ready_event", None)
+    scanner_ready = bool(
+        startup_ready_event is not None and startup_ready_event.is_set()
     )
-    scanner_lock_started = _wait_until_lock_held(
+    if not scanner_ready:
+        return {
+            "completed": False,
+            "failed_step": "qr_scanner_not_ready",
+            "weapon_id": int(weapon_id),
+            "scanner": scanner,
+            "scanner_error": scanner.last_error,
+            "scanner_lock_started": False,
+            "action_matrix": None,
+            "action_matrix_queue": action_matrix_queue,
+        }
+    scanner_lock_held = _wait_until_lock_held(
         challenge_lib.SCANNER_RUNNING_LOCK,
         timeout_sec=scanner_start_timeout_sec,
+    )
+    scanner_completed_before_rigion = bool(scanner.done_event.is_set())
+    scanner_lock_started = bool(
+        scanner_lock_held or scanner_completed_before_rigion
     )
     if not scanner_lock_started:
         scanner.stop()
@@ -362,6 +430,17 @@ def rigion_1(
             "scanner": scanner,
             "scanner_error": scanner.last_error,
             "scanner_lock_started": False,
+            "action_matrix": None,
+            "action_matrix_queue": action_matrix_queue,
+        }
+    if scanner_completed_before_rigion and scanner.last_result is None:
+        return {
+            "completed": False,
+            "failed_step": "qr_scanner_completed_without_plan",
+            "weapon_id": int(weapon_id),
+            "scanner": scanner,
+            "scanner_error": scanner.last_error,
+            "scanner_lock_started": True,
             "action_matrix": None,
             "action_matrix_queue": action_matrix_queue,
         }
@@ -381,6 +460,8 @@ def rigion_1(
     lock_result = None
     unlock_result = None
     weapon_loose_result = None
+    weapon_down_after_release_result = None
+    weapon_up_after_wait_result = None
     qr_wait_result = False
     action_matrix = None
     final_wait_completed = False
@@ -529,8 +610,54 @@ def rigion_1(
                 "weapon_loose_result": weapon_loose_result,
             }
 
+        weapon_down_after_release_result = weapon.weapon_down(
+            sender,
+            **weapon_down_kwargs,
+        )
+        if not weapon_down_after_release_result.get("completed", False):
+            return {
+                "completed": False,
+                "failed_step": "weapon_down_after_release",
+                "weapon_id": int(weapon_id),
+                "scanner": scanner,
+                "scanner_lock_started": bool(scanner_lock_started),
+                "initial_weapon_loose_result": initial_weapon_loose_result,
+                "weapon_down_result": weapon_down_result,
+                "fetch_result": fetch_result,
+                "lock_result": lock_result,
+                "qr_wait_result": qr_wait_result,
+                "action_matrix": action_matrix,
+                "action_matrix_queue": action_matrix_queue,
+                "unlock_result": unlock_result,
+                "weapon_loose_result": weapon_loose_result,
+                "weapon_down_after_release_result": weapon_down_after_release_result,
+            }
+
         time.sleep(float(final_wait_sec))
         final_wait_completed = True
+
+        weapon_up_after_wait_result = weapon.weapon_up(sender)
+        if not weapon_up_after_wait_result.get("completed", False):
+            return {
+                "completed": False,
+                "failed_step": "weapon_up_after_final_wait",
+                "weapon_id": int(weapon_id),
+                "scanner": scanner,
+                "scanner_lock_started": bool(scanner_lock_started),
+                "initial_weapon_loose_result": initial_weapon_loose_result,
+                "weapon_down_result": weapon_down_result,
+                "fetch_result": fetch_result,
+                "lock_result": lock_result,
+                "qr_wait_result": qr_wait_result,
+                "action_matrix": action_matrix,
+                "action_matrix_queue": action_matrix_queue,
+                "unlock_result": unlock_result,
+                "weapon_loose_result": weapon_loose_result,
+                "weapon_down_after_release_result": weapon_down_after_release_result,
+                "weapon_up_after_wait_result": weapon_up_after_wait_result,
+                "final_wait_sec": float(final_wait_sec),
+                "final_wait_completed": bool(final_wait_completed),
+            }
 
         return {
             "completed": True,
@@ -548,6 +675,8 @@ def rigion_1(
             "action_matrix_queue": action_matrix_queue,
             "unlock_result": unlock_result,
             "weapon_loose_result": weapon_loose_result,
+            "weapon_down_after_release_result": weapon_down_after_release_result,
+            "weapon_up_after_wait_result": weapon_up_after_wait_result,
             "final_wait_sec": float(final_wait_sec),
             "final_wait_completed": bool(final_wait_completed),
         }

@@ -162,6 +162,38 @@ def get_pos_to_coord():
     return POS_TO_COORD_RED
 
 
+def get_field_name():
+    """返回当前路径规划所使用的红蓝半场名称。"""
+    return "蓝场" if position_backend.is_blue_field() else "红场"
+
+
+def prompt_field_selection():
+    """直接运行本脚本时选择路线规划使用的红蓝半场。"""
+    while True:
+        field_type = input("请输入当前红蓝半场（1.红 2.蓝）：").strip()
+        if field_type == "1":
+            position_backend.set_field_type(position_backend.FIELD_TYPE_RED)
+            return "红场"
+        if field_type == "2":
+            position_backend.set_field_type(position_backend.FIELD_TYPE_BLUE)
+            return "蓝场"
+        print("输入无效，请输入 1（红场）或 2（蓝场）")
+
+
+def get_visual_position_coord(pos):
+    """返回路线图使用的坐标；蓝场按观察方向镜像整张图。"""
+    x, y, height = pos_to_coord[int(pos)]
+    if position_backend.is_blue_field():
+        y = (GRID_Y_COUNT - 1) - y
+    return float(x), float(y), int(height)
+
+
+def get_visual_y_tick_labels():
+    if position_backend.is_blue_field():
+        return ["+90deg", "center", "-90deg"]
+    return ["-90deg", "center", "+90deg"]
+
+
 def get_coord_to_pos():
     return {coord: pos for pos, coord in get_pos_to_coord().items()}
 
@@ -985,7 +1017,8 @@ def visualize(kfs, path=None):
     ax.set_aspect('equal')
 
     # 画格子
-    for pos, (x, y, height) in sorted(pos_to_coord.items()):
+    for pos in sorted(pos_to_coord):
+        x, y, height = get_visual_position_coord(pos)
         if height == 20:
             face_color = '#006400'
         elif height == 40:
@@ -1022,7 +1055,7 @@ def visualize(kfs, path=None):
 
     # 画出口箭头
     for exit_pos in EXIT_POSITIONS:
-        ex, ey, _ = pos_to_coord[exit_pos]
+        ex, ey, _ = get_visual_position_coord(exit_pos)
         ax.annotate('', xy=(ex + 0.95, ey), xytext=(ex + 0.5, ey),
                     arrowprops=dict(arrowstyle='->', color='blue', lw=2))
         ax.text(ex + 1.02, ey + 0.08, '出口', ha='left', va='bottom',
@@ -1036,7 +1069,7 @@ def visualize(kfs, path=None):
     for pos, typ in kfs.items():
         if typ is None:
             continue
-        x, y, _ = pos_to_coord[pos]
+        x, y, _ = get_visual_position_coord(pos)
         circle = patches.Circle((x, y), 0.3, color=color_map[typ],
                                 alpha=0.85, zorder=5,
                                 edgecolor=edge_color_map[typ], linewidth=2)
@@ -1053,7 +1086,7 @@ def visualize(kfs, path=None):
         if move_positions:
             points = []
             for step in move_positions:
-                x, y, _ = pos_to_coord[step]
+                x, y, _ = get_visual_position_coord(step)
                 points.append((x, y))
 
             xs, ys = zip(*points)
@@ -1062,8 +1095,8 @@ def visualize(kfs, path=None):
 
         # 画夹取路径（蓝色虚线 + 菱形标记，规则11）
         for from_pos, _, to_pos in reach_actions:
-            fx, fy, _ = pos_to_coord[from_pos]
-            tx, ty, _ = pos_to_coord[to_pos]
+            fx, fy, _ = get_visual_position_coord(from_pos)
+            tx, ty, _ = get_visual_position_coord(to_pos)
             ax.plot([fx, tx], [fy, ty],
                     color='#4488FF', linewidth=3, linestyle='--', alpha=0.9, zorder=9)
             ax.scatter([tx], [ty], color='#4488FF', s=120, marker='D',
@@ -1076,7 +1109,7 @@ def visualize(kfs, path=None):
         for step in path:
             if isinstance(step, int):
                 pos_num = step
-                x, y, _ = pos_to_coord[pos_num]
+                x, y, _ = get_visual_position_coord(pos_num)
 
                 if move_idx == 0:
                     txt = "START"
@@ -1098,7 +1131,7 @@ def visualize(kfs, path=None):
 
             elif isinstance(step, tuple) and step[1] == 'reach':
                 _, _, to_pos = step
-                tx, ty, _ = pos_to_coord[to_pos]
+                tx, ty, _ = get_visual_position_coord(to_pos)
                 ax.text(tx + 0.35, ty - 0.15, "夹取",
                         ha='left', va='top',
                         fontsize=8, fontweight='bold', color='#4488FF',
@@ -1120,14 +1153,14 @@ def visualize(kfs, path=None):
               framealpha=0.9)
 
     reach_count = len(get_reach_actions(path)) if path else 0
-    ax.set_title("崇武探幽 - R2最短路径规划\n"
+    ax.set_title(f"崇武探幽 - {get_field_name()} R2最短路径规划\n"
                  f"（从位置2进入，抓取{REQUIRED_R2_PICKUP_COUNT}个R2-KFS，从13/15出口离开）\n"
                  f"白色线=移动  蓝色虚线=夹取(共{reach_count}次)",
                  fontsize=13, pad=15)
     ax.set_xticks([0, 1, 2, 3, 4])
     ax.set_xticklabels(['x0', 'x1', 'x2', 'x3', 'x4'], fontsize=11)
     ax.set_yticks([0, 1, 2])
-    ax.set_yticklabels(['-90deg', 'center', '+90deg'], fontsize=11)
+    ax.set_yticklabels(get_visual_y_tick_labels(), fontsize=11)
     ax.grid(True, linestyle=':', alpha=0.3)
 
     plt.tight_layout()
@@ -1170,11 +1203,12 @@ def save_visualization_svg(kfs, path=None, filename="race_visualization.svg"):
     lines = [
         f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}">',
         '<rect width="100%" height="100%" fill="#f3f4f6"/>',
-        '<text x="30" y="34" font-size="22" font-family="sans-serif" font-weight="700" fill="#111827">R2 路径规划图</text>',
+        f'<text x="30" y="34" font-size="22" font-family="sans-serif" font-weight="700" fill="#111827">{get_field_name()} R2 路径规划图</text>',
         '<text x="30" y="58" font-size="13" font-family="sans-serif" fill="#374151">白线=移动路径，蓝色虚线=夹取路径</text>',
     ]
 
-    for pos, (x, y, h) in sorted(pos_to_coord.items()):
+    for pos in sorted(pos_to_coord):
+        x, y, h = get_visual_position_coord(pos)
         px = sx(x)
         py = sy(y)
         fill = height_color.get(h, "#ffffff")
@@ -1198,7 +1232,7 @@ def save_visualization_svg(kfs, path=None, filename="race_visualization.svg"):
         )
 
     # 入口和出口箭头。
-    entry_x, entry_y, _ = pos_to_coord[ENTRY_POS]
+    entry_x, entry_y, _ = get_visual_position_coord(ENTRY_POS)
     epx = sx(entry_x)
     epy = sy(entry_y)
     lines.append('<defs><marker id="arrow-red" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth"><path d="M0,0 L0,6 L9,3 z" fill="#dc2626"/></marker><marker id="arrow-blue" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth"><path d="M0,0 L0,6 L9,3 z" fill="#2563eb"/></marker></defs>')
@@ -1207,7 +1241,7 @@ def save_visualization_svg(kfs, path=None, filename="race_visualization.svg"):
         'stroke="#dc2626" stroke-width="4" marker-end="url(#arrow-red)"/>'
     )
     for exit_pos in EXIT_POSITIONS:
-        ex, ey, _ = pos_to_coord[exit_pos]
+        ex, ey, _ = get_visual_position_coord(exit_pos)
         px = sx(ex)
         py = sy(ey)
         lines.append(
@@ -1221,15 +1255,15 @@ def save_visualization_svg(kfs, path=None, filename="race_visualization.svg"):
         if len(move_positions) >= 2:
             points = []
             for step in move_positions:
-                x, y, _ = pos_to_coord[step]
+                x, y, _ = get_visual_position_coord(step)
                 points.append(f"{sx(x):.1f},{sy(y):.1f}")
             lines.append(
                 f'<polyline points="{" ".join(points)}" fill="none" stroke="#ffffff" '
                 'stroke-width="9" stroke-linecap="round" stroke-linejoin="round" opacity="0.95"/>'
             )
         for from_pos, _, to_pos in reach_actions:
-            fx, fy, _ = pos_to_coord[from_pos]
-            tx, ty, _ = pos_to_coord[to_pos]
+            fx, fy, _ = get_visual_position_coord(from_pos)
+            tx, ty, _ = get_visual_position_coord(to_pos)
             lines.append(
                 f'<line x1="{sx(fx):.1f}" y1="{sy(fy):.1f}" x2="{sx(tx):.1f}" y2="{sy(ty):.1f}" '
                 'stroke="#4488ff" stroke-width="5" stroke-dasharray="10 8" stroke-linecap="round"/>'
@@ -1240,7 +1274,7 @@ def save_visualization_svg(kfs, path=None, filename="race_visualization.svg"):
                 f'{sx(tx):.1f} {sy(ty):.1f})"/>'
             )
         for index, step in enumerate(move_positions):
-            x, y, _ = pos_to_coord[step]
+            x, y, _ = get_visual_position_coord(step)
             label = "S" if index == 0 else ("E" if index == len(move_positions) - 1 else str(index))
             lines.append(
                 f'<circle cx="{sx(x):.1f}" cy="{sy(y):.1f}" r="17" fill="#ffffff" stroke="#14532d" stroke-width="2"/>'
@@ -1253,7 +1287,7 @@ def save_visualization_svg(kfs, path=None, filename="race_visualization.svg"):
     for pos, typ in sorted(kfs.items()):
         if typ is None or pos not in pos_to_coord:
             continue
-        x, y, _ = pos_to_coord[pos]
+        x, y, _ = get_visual_position_coord(pos)
         px = sx(x)
         py = sy(y)
         lines.append(
@@ -1911,6 +1945,8 @@ def run_manual_qr_planning():
 if __name__ == "__main__":
     print("崇武探幽 - R2行动路线规划系统")
     print("=" * 40)
+    selected_field = prompt_field_selection()
+    print(f"当前规划半场：{selected_field}")
     prompt_kfs_count_config()
     print("=" * 40)
     print("1. 批量测试（10000次随机KFS放置）")

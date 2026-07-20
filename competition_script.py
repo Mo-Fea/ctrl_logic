@@ -5,7 +5,9 @@ from lib2 import compete_logic
 from lib2 import kfs
 from lib2 import module
 from lib2 import position_backend
-from utils import race
+from lib2 import position_odin
+from lib2 import tools
+from utils import challenge_lib, race
 
 
 final_strategy = 1
@@ -23,11 +25,14 @@ flag_thread = None
 flag_stop_event = None
 position_runtime = None
 odom_runtime = None
+odometry_start_config = None
+localization_ready = False
 
 ERROR_INPUT_TEXT = "错误输入，请按照提示重新输入"
 YELLOW = "\033[33m"
 RESET = "\033[0m"
 SEPARATOR_TEXT = "---------------------------------------------------------"
+QR_SCANNER_STARTUP_TIMEOUT_SEC = 30.0
 
 
 def print_separator():
@@ -84,7 +89,10 @@ def read_qr_payload(prompt):
 def wait_start(prompt="请输入1开始执行：", allow_back=True):
     valid_values = (0, 1) if allow_back else (1,)
     value = read_int(prompt, valid_values=valid_values)
-    return value == 1
+    if value != 1:
+        return False
+    ensure_localization_ready()
+    return True
 
 
 def set_field_by_input():
@@ -119,6 +127,40 @@ def set_final_strategy_by_input():
         valid_values=(1, 2),
     )
     return final_strategy
+
+
+def set_odometry_start_config_by_input():
+    """预先保存 odom 模式的雷达逻辑地图启动点，不立即应用。"""
+    global odometry_start_config
+
+    print("请选择 odom 模式雷达启动点（仅在收到 odom 标志后生效）：")
+    print("0. 手动输入已知雷达坐标")
+    for point_id, (point_name, (x, y)) in sorted(
+        position_odin.ODOMETRY_START_POINTS.items()
+    ):
+        print(f"{int(point_id)}. {point_name}: ({float(x):.4f}, {float(y):.4f})")
+
+    point_id = read_int("请输入启动点编号：", valid_values=(0, 1, 2))
+    if point_id == 0:
+        x = read_float("请输入启动点雷达x坐标（m）：")
+        y = read_float("请输入启动点雷达y坐标（m）：")
+        name = "manual"
+    else:
+        name, (x, y) = position_odin.ODOMETRY_START_POINTS[point_id]
+
+    odometry_start_config = {
+        "id": int(point_id),
+        "name": str(name),
+        "x": float(x),
+        "y": float(y),
+    }
+    print(
+        "已保存 odom 雷达启动点："
+        f"{odometry_start_config['name']} "
+        f"({odometry_start_config['x']:.4f}, "
+        f"{odometry_start_config['y']:.4f})"
+    )
+    return dict(odometry_start_config)
 
 
 def read_weapon_id():
@@ -158,10 +200,67 @@ def initialize_runtime():
         flag_node,
         flag_thread,
         flag_stop_event,
-    ) = module.init(lidar_type=position_backend.LIDAR_TYPE_ODIN)
+    ) = module.init(
+        lidar_type=position_backend.LIDAR_TYPE_ODIN,
+        wait_relocalization=False,
+        prompt_odometry_start_point=False,
+    )
+    print("通信与定位标志监听已启动；输入1开始执行后初始化坐标资源")
+
+
+def ensure_localization_ready():
+    """首次开始执行时确认定位模式、应用预设 odom 起点并启动坐标资源。"""
+    global flag_node
+    global flag_thread
+    global flag_stop_event
+    global position_runtime
+    global odom_runtime
+    global localization_ready
+
+    if localization_ready:
+        return
+    if sender is None:
+        raise RuntimeError("runtime is not initialized")
+
+    print("等待重定位/odom 模式标志...")
+    while not tools.localization_mode_received:
+        time.sleep(0.01)
+
+    if tools.is_odometry_mode():
+        if odometry_start_config is None:
+            raise RuntimeError("odometry start config was not selected")
+        position_lib = module.get_position_lib()
+        set_start_pose = getattr(position_lib, "set_odometry_start_lidar_pose", None)
+        if set_start_pose is None:
+            raise RuntimeError("current position backend does not support odometry start pose")
+        set_start_pose(
+            odometry_start_config["x"],
+            odometry_start_config["y"],
+        )
+        print(
+            "已应用 odom 雷达启动点："
+            f"{odometry_start_config['name']} "
+            f"({odometry_start_config['x']:.4f}, "
+            f"{odometry_start_config['y']:.4f})"
+        )
+    else:
+        print("已确认重定位模式")
+
+    if flag_node is not None or flag_thread is not None or flag_stop_event is not None:
+        tools.destroy_ros2_thread(
+            node=flag_node,
+            spin_thread=flag_thread,
+            stop_event=flag_stop_event,
+            shutdown_rclpy=False,
+        )
+        flag_node = None
+        flag_thread = None
+        flag_stop_event = None
+
     position_runtime = module.start_position_thread(sender)
     odom_runtime = module.start_odometry_thread(topic=module.ODOM_TOPIC)
-    print("初始化成功")
+    localization_ready = True
+    print("定位模式与坐标资源已就绪")
 
 
 def get_rigion_3_final_strategy():
@@ -179,6 +278,44 @@ def print_flow_failure(region_name, result):
     )
 
 
+def start_qr_scanner_or_exit(
+    action_matrix_queue=None,
+    startup_timeout_sec=QR_SCANNER_STARTUP_TIMEOUT_SEC,
+):
+    """
+    在比赛参数已生效后启动二维码识别线程。
+
+    只有成功打开图像源、获取到首帧彩色图并完成首轮识别时才允许进入区域 1；
+    任一启动步骤失败或超时均终止程序，避免无扫码能力时继续执行硬件动作。
+    """
+    action_matrix_queue = (
+        compete_logic.ACTION_MATRIX_QUEUE
+        if action_matrix_queue is None
+        else action_matrix_queue
+    )
+    compete_logic.clear_action_matrix_queue(action_matrix_queue)
+    scanner = challenge_lib.start_background_qr_scanner(
+        result_queue=action_matrix_queue,
+        stable_frame_count=2,
+        show_window=False,
+        stop_after_success=True,
+        put_action_matrix_only=True,
+        image_source=1,
+    )
+
+    if scanner.wait_until_ready(timeout=float(startup_timeout_sec)):
+        print("二维码识别线程已启动：彩色图像与首轮识别校验通过")
+        return scanner, action_matrix_queue
+
+    scanner.stop()
+    scanner.join(timeout=1.0)
+    startup_error = scanner.last_error
+    raise SystemExit(
+        "二维码识别线程启动失败或未能获取彩色图像，程序终止："
+        f"{startup_error!r}"
+    )
+
+
 def run_full_confrontation_match():
     print_current_config("完整比赛/对抗赛")
     config_result = race.configure_kfs_counts(
@@ -187,13 +324,16 @@ def run_full_confrontation_match():
         required_r2_pickup_count=kfs_suck,
     )
     print(f"规划数量配置已更新：{config_result}")
+    scanner, action_matrix_queue = start_qr_scanner_or_exit()
 
     region_1_result = compete_logic.rigion_1(
         sender=sender,
         position_runtime=position_runtime,
         odom_runtime=odom_runtime,
+        scanner=scanner,
         weapon_id=weapon_id,
         fetch_weapon_y_correction=WEAPON_Y_CORRECTION,
+        action_matrix_queue=action_matrix_queue,
     )
     if not region_1_result.get("completed", False):
         print_flow_failure("区域1", region_1_result)
@@ -276,13 +416,16 @@ def run_full_challenge_wulin_match():
         required_r2_pickup_count=kfs_suck,
     )
     print(f"规划数量配置已更新：{config_result}")
+    scanner, action_matrix_queue = start_qr_scanner_or_exit()
 
     region_1_result = compete_logic.rigion_1(
         sender=sender,
         position_runtime=position_runtime,
         odom_runtime=odom_runtime,
+        scanner=scanner,
         weapon_id=weapon_id,
         fetch_weapon_y_correction=WEAPON_Y_CORRECTION,
+        action_matrix_queue=action_matrix_queue,
     )
     if not region_1_result.get("completed", False):
         print_flow_failure("区域1", region_1_result)
@@ -339,8 +482,8 @@ def run_full_challenge_jiugong_match(
         print("KFS吸取准备执行完成")
 
     if wait_before_region_3:
-        print("等待10秒")
-        time.sleep(10.0)
+        print("等待3秒")
+        time.sleep(3.0)
 
     region_3_result = compete_logic.rigion3_challenge(
         sender=sender,
@@ -474,8 +617,74 @@ def run_confrontation_meilin_retry():
     }
 
 
-def run_challenge_jiugong_retry(kfs_preparation_result=None):
-    print_current_config("区域重试/挑战赛/九宫格区域")
+def run_challenge_jiugong_retry(
+    final_strategy,
+    kfs_preparation_result=None,
+    column=None,
+    extra_needed=None,
+    wait_before_region_3=False,
+):
+    """挑战赛九宫格重试：跳过入场，直接执行挑战版最终策略。"""
+    final_strategy = int(final_strategy)
+    if final_strategy not in (1, 2):
+        raise ValueError(f"final_strategy must be 1 or 2, got {final_strategy}")
+    if final_strategy == 2 and (column is None or extra_needed is None):
+        raise ValueError(
+            "column and extra_needed are required when final_strategy is 2"
+        )
+
+    print("准备执行：区域重试/挑战赛/九宫格区域")
+    print(
+        "本次策略："
+        f"{'大胜逻辑' if final_strategy == 2 else '190逻辑'}"
+    )
+
+    prepared_here = kfs_preparation_result is None
+    if kfs_preparation_result is None:
+        kfs_preparation_result = kfs.kfs_suck_preparation(sender=sender, count=2)
+    if not kfs_preparation_result.get("completed", False):
+        print("KFS吸取准备执行失败")
+        return {
+            "completed": False,
+            "failed_region": "kfs_suck_preparation",
+            "kfs_preparation_result": kfs_preparation_result,
+            "strategy_result": None,
+        }
+    if prepared_here:
+        print("KFS吸取准备执行完成")
+
+    if wait_before_region_3:
+        print("等待3秒")
+        time.sleep(3.0)
+
+    strategy_result = compete_logic.rigion_3_execute_strategy_challenge(
+        sender=sender,
+        position_runtime=position_runtime,
+        odom_runtime=odom_runtime,
+        final_strategy=final_strategy,
+        column=column,
+        extra_needed=extra_needed,
+    )
+    if not strategy_result.get("completed", False):
+        print_flow_failure("挑战赛最终策略", strategy_result)
+        return {
+            "completed": False,
+            "failed_region": "rigion_3_execute_strategy_challenge",
+            "kfs_preparation_result": kfs_preparation_result,
+            "strategy_result": strategy_result,
+        }
+
+    print("区域重试/挑战赛/九宫格区域执行完成")
+    return {
+        "completed": True,
+        "failed_region": None,
+        "kfs_preparation_result": kfs_preparation_result,
+        "strategy_result": strategy_result,
+    }
+
+
+def run_confrontation_jiugong_retry(kfs_preparation_result=None):
+    print_current_config("区域重试/对抗赛/九宫格区域")
 
     prepared_here = kfs_preparation_result is None
     if kfs_preparation_result is None:
@@ -674,18 +883,67 @@ def jiugong_retry_flow():
     print_separator()
     print("九宫格区域重试")
     print_back_option()
-    kfs_suck = read_int("请输入需要吸取的KFS数量（0-2）：", min_value=0, max_value=2)
-    kfs_preparation_result = kfs.kfs_suck_preparation(sender=sender, count=kfs_suck)
-    if not kfs_preparation_result.get("completed", False):
-        print("KFS吸取准备执行失败")
-        return
-    print("KFS吸取准备执行完成")
-    if not wait_start():
-        return
+
     if current_rule == 1:
-        run_challenge_jiugong_retry(kfs_preparation_result=kfs_preparation_result)
+        selected_logic = read_int(
+            "所需执行逻辑(1.大胜逻辑 2.190逻辑 0.返回)：",
+            valid_values=(0, 1, 2),
+        )
+        if selected_logic == 0:
+            return
+
+        # 与挑战赛九宫格完整比赛一致，固定准备双气缸并使 suck_count=3。
+        kfs_suck = 2
+        kfs_preparation_result = kfs.kfs_suck_preparation(
+            sender=sender,
+            count=kfs_suck,
+        )
+        if not kfs_preparation_result.get("completed", False):
+            print("KFS吸取准备执行失败")
+            return
+        print("KFS吸取准备执行完成")
+        if not wait_start():
+            return
+
+        column = None
+        extra_needed = None
+        # 菜单 1=大胜，对应挑战策略内部编号 2；菜单 2=190，对应编号 1。
+        challenge_final_strategy = 2 if selected_logic == 1 else 1
+        if challenge_final_strategy == 2:
+            column = read_int(
+                "请输入需要放置的列号（1-3）：",
+                valid_values=(1, 2, 3),
+            )
+            extra_needed = read_int(
+                "是否需要额外吸取（0.否 1.是）：",
+                valid_values=(0, 1),
+            )
+
+        run_challenge_jiugong_retry(
+            final_strategy=challenge_final_strategy,
+            kfs_preparation_result=kfs_preparation_result,
+            column=column,
+            extra_needed=extra_needed,
+        )
     elif current_rule == 2:
-        run_challenge_jiugong_retry(kfs_preparation_result=kfs_preparation_result)
+        kfs_suck = read_int(
+            "请输入需要吸取的KFS数量（0-2）：",
+            min_value=0,
+            max_value=2,
+        )
+        kfs_preparation_result = kfs.kfs_suck_preparation(
+            sender=sender,
+            count=kfs_suck,
+        )
+        if not kfs_preparation_result.get("completed", False):
+            print("KFS吸取准备执行失败")
+            return
+        print("KFS吸取准备执行完成")
+        if not wait_start():
+            return
+        run_confrontation_jiugong_retry(
+            kfs_preparation_result=kfs_preparation_result,
+        )
     else:
         print(ERROR_INPUT_TEXT)
 
@@ -746,10 +1004,11 @@ def main_menu():
 
 
 def main():
-    initialize_runtime()
     set_field_by_input()
     set_rule_by_input()
     set_final_strategy_by_input()
+    set_odometry_start_config_by_input()
+    initialize_runtime()
     main_menu()
 
 
